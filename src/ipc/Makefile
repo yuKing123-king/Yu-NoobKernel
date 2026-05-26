@@ -1,0 +1,5 @@
+MODULE_PATH := ipc
+SRCS :=
+SUBMODULES :=
+
+include $(RULES_MK)

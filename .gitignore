@@ -1,0 +1,10 @@
+.vscode
+build
+*.o
+*.d
+*.asm
+*.sym
+compile_commands.json
+.cache
+.venv
+outdated
