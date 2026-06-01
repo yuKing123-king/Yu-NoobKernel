@@ -1,0 +1,313 @@
+/*
+ * init.c — 比赛测试运行器
+ * 启动后扫描根目录找 *_testcode.sh，输出 markers 并尝试执行测试 ELF
+ */
+
+/* Syscall 编号 (Linux RISC-V ABI) */
+#define SYS_read        63
+#define SYS_write       64
+#define SYS_openat      56
+#define SYS_close       57
+#define SYS_getdents64  61
+#define SYS_fork        220
+#define SYS_execve      221
+#define SYS_exit        93
+#define SYS_brk         214
+#define SYS_wait4       260
+#define SYS_shutdown    500
+
+/* openat flags */
+#define O_RDONLY    0
+#define O_DIRECTORY 0200000
+
+/* file types (Linux d_type) */
+#define DT_REG       8
+
+/* dirent 结构（Linux getdents64 ABI） */
+struct linux_dirent64 {
+	unsigned long long d_ino;
+	long long d_off;
+	unsigned short d_reclen;
+	unsigned char d_type;
+	char d_name[0];
+};
+
+/* 内联 syscall */
+static long syscall1(long n, long a0)
+{
+	register long a7 asm("a7") = n;
+	register long _a0 asm("a0") = a0;
+	asm volatile("ecall" : "+r"(_a0) : "r"(a7) : "memory");
+	return _a0;
+}
+
+static long syscall3(long n, long a0, long a1, long a2)
+{
+	register long a7 asm("a7") = n;
+	register long _a0 asm("a0") = a0;
+	register long _a1 asm("a1") = a1;
+	register long _a2 asm("a2") = a2;
+	asm volatile("ecall"
+			     : "+r"(_a0)
+			     : "r"(a7), "r"(_a1), "r"(_a2)
+			     : "memory");
+	return _a0;
+}
+
+static long syscall4(long n, long a0, long a1, long a2, long a3)
+{
+	register long a7 asm("a7") = n;
+	register long _a0 asm("a0") = a0;
+	register long _a1 asm("a1") = a1;
+	register long _a2 asm("a2") = a2;
+	register long _a3 asm("a3") = a3;
+	asm volatile("ecall"
+			     : "+r"(_a0)
+			     : "r"(a7), "r"(_a1), "r"(_a2), "r"(_a3)
+			     : "memory");
+	return _a0;
+}
+
+/* 简单 libc */
+static int my_strlen(const char *s)
+{
+	int n = 0;
+	while (*s++) n++;
+	return n;
+}
+
+static int my_strcmp(const char *a, const char *b)
+{
+	while (*a && *a == *b) { a++; b++; }
+	return *(unsigned char *)a - *(unsigned char *)b;
+}
+
+static int my_strcpy(char *dst, const char *src)
+{
+	char *d = dst;
+	while ((*d++ = *src++))
+		;
+	return d - dst - 1;
+}
+
+static int my_strcat(char *dst, const char *src)
+{
+	char *d = dst + my_strlen(dst);
+	while ((*d++ = *src++))
+		;
+	return my_strlen(dst);
+}
+
+/* I/O */
+static long my_write(int fd, const char *buf, int len)
+{
+	return syscall3(SYS_write, fd, (long)buf, len);
+}
+
+static void prints(const char *s) { my_write(1, s, my_strlen(s)); }
+
+static void printn(long n)
+{
+	char buf[20];
+	int i = 0;
+	if (n < 0) { my_write(1, "-", 1); n = -n; }
+	if (n == 0) { my_write(1, "0", 1); return; }
+	while (n > 0) { buf[i++] = '0' + (n % 10); n /= 10; }
+	while (i > 0) my_write(1, &buf[--i], 1);
+}
+
+static void println(void) { my_write(1, "\r\n", 2); }
+
+static long my_openat(int dirfd, const char *path, int flags)
+{
+	return syscall3(SYS_openat, dirfd, (long)path, flags);
+}
+
+static long my_close(int fd) { return syscall1(SYS_close, fd); }
+static long my_read(int fd, void *buf, int len)
+{
+	return syscall3(SYS_read, fd, (long)buf, len);
+}
+
+static long my_getdents64(int fd, void *buf, int len)
+{
+	return syscall3(SYS_getdents64, fd, (long)buf, len);
+}
+
+static long my_fork(void)
+{
+	register long a7 asm("a7") = SYS_fork;
+	register long _a0 asm("a0") = 0;
+	asm volatile("ecall" : "+r"(_a0) : "r"(a7) : "memory");
+	return _a0;
+}
+
+static long my_execve(const char *path, long argv, long envp)
+{
+	return syscall3(SYS_execve, (long)path, argv, envp);
+}
+
+static long my_wait4(int pid, int *status, int options, long rusage)
+{
+	return syscall4(SYS_wait4, pid, (long)status, options, rusage);
+}
+
+__attribute__((noreturn))
+static void my_exit(int code) { syscall1(SYS_exit, code); while (1) {} }
+
+static long my_brk(long addr) { return syscall1(SYS_brk, addr); }
+__attribute__((noreturn))
+static void my_shutdown(void)
+{
+	syscall1(SYS_shutdown, 0);
+	while (1) {}
+}
+static long heap_end = 0;
+
+static int is_test_script(const char *name)
+{
+	int len = my_strlen(name);
+	if (len <= 12) return 0;
+	return my_strcmp(name + len - 12, "_testcode.sh") == 0;
+}
+
+static int extract_group(const char *name, char *out, int maxlen)
+{
+	int len = my_strlen(name);
+	int glen = len - 12;
+	if (glen <= 0 || glen >= maxlen) return -1;
+	for (int i = 0; i < glen; i++) out[i] = name[i];
+	out[glen] = '\0';
+	return 0;
+}
+
+static int is_elf(const char *name)
+{
+	int fd = my_openat(-100, name, O_RDONLY);
+	if (fd < 0) return 0;
+	char magic[4];
+	long n = my_read(fd, magic, 4);
+	my_close(fd);
+	return n == 4 && magic[0] == 0x7f && magic[1] == 'E' &&
+	       magic[2] == 'L' && magic[3] == 'F';
+}
+
+__attribute__((section(".text.entry"), noinline, noreturn))
+void _start(void)
+{
+	heap_end = my_brk(0);
+
+	prints("#### OS COMP TEST START ####");
+	println();
+
+	int fd = my_openat(-100, "/", O_RDONLY | O_DIRECTORY);
+	if (fd < 0) { my_exit(1); }
+
+	char buf[4096];
+	int total_scripts = 0;
+
+	/* 第一次扫描：输出 markers */
+	my_getdents64(fd, buf, sizeof(buf));
+
+	int pos = 0;
+	while (pos < 4096) {
+		struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + pos);
+		if (d->d_reclen == 0) break;
+		char *name = d->d_name;
+		if (name[0] == '.' && (name[1] == '\0' ||
+		    (name[1] == '.' && name[2] == '\0'))) {
+			pos += d->d_reclen;
+			continue;
+		}
+		if (is_test_script(name)) {
+			char group[64];
+			if (extract_group(name, group, 64) == 0) {
+				prints("#### OS COMP TEST GROUP START ");
+				prints(group);
+				prints(" ####");
+				println();
+				total_scripts++;
+			}
+		}
+		pos += d->d_reclen;
+	}
+	my_close(fd);
+
+	if (total_scripts == 0) {
+		prints("No test scripts found.");
+		println();
+		prints("#### OS COMP TEST END ####");
+		println();
+		my_shutdown();
+		my_exit(0);
+	}
+
+	/* 第二次扫描：fork + execve ELF */
+	fd = my_openat(-100, "/", O_RDONLY | O_DIRECTORY);
+	if (fd < 0) { my_exit(1); }
+	my_getdents64(fd, buf, sizeof(buf));
+	my_close(fd);
+
+	pos = 0;
+	while (pos < 4096) {
+		struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + pos);
+		if (d->d_reclen == 0) break;
+		char *name = d->d_name;
+		if (name[0] == '.' && (name[1] == '\0' ||
+		    (name[1] == '.' && name[2] == '\0'))) {
+			pos += d->d_reclen;
+			continue;
+		}
+
+		if (d->d_type == DT_REG && is_elf(name)) {
+			char path[128];
+			int nlen = my_strlen(name);
+			if (nlen > 120) {
+				pos += d->d_reclen;
+				continue;
+			}
+			my_strcpy(path, "/");
+			my_strcat(path, name);
+
+			prints("[RUN] ");
+			prints(path);
+			println();
+
+			long cpid = my_fork();
+			if (cpid == 0) {
+				/* 子进程：execve 测试 ELF */
+				long argv[2] = { (long)path, 0 };
+				long ret = my_execve(path, (long)argv, 0);
+				/* 如果 execve 成功，不会到这里 */
+				prints("[FAIL] execve failed: ");
+				printn(ret);
+				println();
+				my_exit(127);
+			}
+			/* 父进程：wait4 等待子进程 */
+			prints("[WAIT] waiting for pid ");
+			printn(cpid);
+			println();
+
+			int status = 0;
+			long wret = my_wait4(cpid, &status, 0, 0);
+			if (wret > 0) {
+				prints("[DONE] pid ");
+				printn(wret);
+				prints(" status=");
+				printn(status);
+				println();
+			} else {
+				prints("[WAIT] failed: ");
+				printn(wret);
+				println();
+			}
+		}
+
+		pos += d->d_reclen;
+	}
+
+	prints("#### OS COMP TEST END ####");
+	println();
+	my_shutdown();
+}
