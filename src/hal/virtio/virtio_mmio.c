@@ -31,29 +31,57 @@
 #define VIRTIO_REG_CONFIG_GEN 0x0fc
 #define VIRTIO_REG_CONFIG 0x100
 
+/*
+ * 读取Virtio MMIO寄存器的值
+ * @param dev: Virtio设备结构体指针
+ * @param offset: 寄存器偏移量
+ * @return: 寄存器32位值
+ */
 static inline u32 virtio_read_reg(struct virtio_device *dev, u32 offset)
 {
 	return mmio_read32((void *)((uintptr_t)dev->regs + offset));
 }
 
+/*
+ * 向Virtio MMIO寄存器写入值
+ * @param dev: Virtio设备结构体指针
+ * @param offset: 寄存器偏移量
+ * @param val: 待写入的32位值
+ */
 static inline void virtio_write_reg(struct virtio_device *dev, u32 offset,
 				    u32 val)
 {
 	mmio_write32((void *)((uintptr_t)dev->regs + offset), val);
 }
 
+/*
+ * 设置Virtio设备的状态寄存器
+ * @param dev: Virtio设备结构体指针
+ * @param status: 状态值
+ */
 void virtio_set_status(struct virtio_device *dev, u32 status)
 {
 	virtio_write_reg(dev, VIRTIO_REG_STATUS, status);
 	mb();
 }
 
+/*
+ * 读取Virtio设备的状态寄存器
+ * @param dev: Virtio设备结构体指针
+ * @return: 当前状态值
+ */
 u32 virtio_get_status(struct virtio_device *dev)
 {
 	rmb();
 	return virtio_read_reg(dev, VIRTIO_REG_STATUS);
 }
 
+/*
+ * 探测Virtio MMIO设备，验证Magic值和版本号
+ * @param regs: Virtio MMIO寄存器指针
+ * @param irqno: 中断号
+ * @return: 成功返回0，失败返回-1
+ */
 int virtio_mmio_probe(struct virtio_mmio_regs *regs, u32 irqno)
 {
 	u32 magic = mmio_read32(&regs->magic_value);
@@ -81,6 +109,11 @@ int virtio_mmio_probe(struct virtio_mmio_regs *regs, u32 irqno)
 	return 0;
 }
 
+/*
+ * 初始化Virtio MMIO设备，完成ACKNOWLEDGE和DRIVER状态设置
+ * @param dev: Virtio设备结构体指针
+ * @return: 成功返回0，失败返回-1
+ */
 int virtio_mmio_init(struct virtio_device *dev)
 {
 	virtio_set_status(dev, 0);
@@ -106,6 +139,13 @@ int virtio_mmio_init(struct virtio_device *dev)
 	return 0;
 }
 
+/*
+ * 协商Virtio设备特性：读取设备特性，屏蔽被拒绝的特性，写入驱动特性并确认
+ * @param dev: Virtio设备结构体指针
+ * @param required: 强制要求的特性位掩码
+ * @param rejected: 拒绝的特性位掩码（将被清除）
+ * @return: 成功返回0，失败返回-1
+ */
 int virtio_negotiate_features(struct virtio_device *dev, u32 required,
 			      u32 rejected)
 {
@@ -132,6 +172,13 @@ int virtio_negotiate_features(struct virtio_device *dev, u32 required,
 	return 0;
 }
 
+/*
+ * 设置Virtio设备的虚拟队列，分配描述符、avail和used ring并写入MMIO寄存器
+ * @param dev: Virtio设备结构体指针
+ * @param vq_idx: 队列索引
+ * @param num: 队列大小（描述符数量）
+ * @return: 成功返回0，失败返回-1
+ */
 int virtio_setup_vq(struct virtio_device *dev, u32 vq_idx, u16 num)
 {
 	if (vq_idx >= 8) {
@@ -190,6 +237,10 @@ int virtio_setup_vq(struct virtio_device *dev, u32 vq_idx, u16 num)
 	return 0;
 }
 
+/*
+ * Virtio中断处理函数，读取中断状态并应答中断
+ * @param dev: Virtio设备结构体指针
+ */
 void virtio_irq_handler(struct virtio_device *dev)
 {
 	u32 status = virtio_read_reg(dev, VIRTIO_REG_INT_STATUS);
@@ -206,6 +257,12 @@ void virtio_irq_handler(struct virtio_device *dev)
 	mb();
 }
 
+/*
+ * 读取Virtio设备的配置空间（带世代号检测，防止读取到不一致数据）
+ * @param dev: Virtio设备结构体指针
+ * @param offset: 配置空间偏移量
+ * @return: 配置值（32位）
+ */
 u32 virtio_read_config(struct virtio_device *dev, u32 offset)
 {
 	u32 old_gen, new_gen;
@@ -220,6 +277,12 @@ u32 virtio_read_config(struct virtio_device *dev, u32 offset)
 	return value;
 }
 
+/*
+ * 写入Virtio设备的配置空间
+ * @param dev: Virtio设备结构体指针
+ * @param offset: 配置空间偏移量
+ * @param value: 待写入的32位值
+ */
 void virtio_write_config(struct virtio_device *dev, u32 offset, u32 value)
 {
 	virtio_write_reg(dev, VIRTIO_REG_CONFIG + offset, value);

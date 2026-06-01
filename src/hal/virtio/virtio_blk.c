@@ -9,6 +9,7 @@
 #include <misc/log.h>
 #include <sync/barrier.h>
 #include <mm/kalloc.h>
+#include <platform/qemu_virt.h>
 
 struct virtio_blk_request {
 	struct virtio_blk_req hdr;
@@ -25,7 +26,8 @@ struct virtio_blk_device {
 	u32 block_size;
 };
 
-static struct virtio_blk_device *virtio_blk;
+static struct virtio_blk_device *virtio_blks[VIRTIO_BLK_MAX_DEVICES];
+static int virtio_blk_count = 0;
 
 static int virtio_blk_rw(struct block_device *dev, u64 sector, void *buf,
 			 u32 nsectors, bool write);
@@ -148,54 +150,68 @@ static u32 virtio_blk_block_size(struct block_device *dev)
 	return blk_dev->block_size;
 }
 
-void virtio_blk_isr(void)
+void virtio_blk_isr(int irqno)
 {
-	if (!virtio_blk)
-		return;
+	for (int i = 0; i < virtio_blk_count; i++) {
+		struct virtio_blk_device *blk = virtio_blks[i];
+		if (!blk)
+			continue;
 
-	virtio_irq_handler(&virtio_blk->vdev);
+		virtio_irq_handler(&blk->vdev);
 
-	struct virtq *vq = virtio_blk->vdev.vqs[0];
-	if (vq) {
-		while (virtq_has_buf(vq)) {
-			u32 len;
-			struct virtio_blk_request *req =
-			    virtq_get_buf(vq, &len);
-			if (req) {
-				req->completed = true;
+		struct virtq *vq = blk->vdev.vqs[0];
+		if (vq) {
+			while (virtq_has_buf(vq)) {
+				u32 len;
+				struct virtio_blk_request *req =
+				    virtq_get_buf(vq, &len);
+				if (req) {
+					req->completed = true;
+				}
 			}
 		}
 	}
 }
 
-int virtio_blk_init(void)
+/*
+ * 初始化单个 Virtio 块设备
+ * @param mmio_addr: MMIO 寄存器基地址
+ * @param irqno: 中断号
+ * @param minor: 设备 minor 号
+ * @return: 成功返回0，失败返回-1
+ */
+static int virtio_blk_init_one(uintptr_t mmio_addr, u32 irqno, int minor)
 {
-	struct virtio_mmio_raw raw = VIRTIO_MMIO_0;
-	struct virtio_mmio_regs *regs = (void *)raw.addr;
+	struct virtio_mmio_regs *regs = (void *)mmio_addr;
 
-	if (virtio_mmio_probe(regs, raw.irqno) < 0) {
+	if (virtio_mmio_probe(regs, irqno) < 0)
 		return -1;
-	}
 
 	u32 device_id = mmio_read32(&regs->device_id);
 	if (device_id != VIRTIO_DEVICE_TYPE_DISK) {
-		warnf("virtio_blk_init: not a block device, id=%d", device_id);
+		warnf("virtio_blk_init: not a block device at %p, id=%d",
+		      (void *)mmio_addr, device_id);
 		return -1;
 	}
 
-	virtio_blk = kzalloc(sizeof(*virtio_blk));
-	if (!virtio_blk) {
+	if (minor >= VIRTIO_BLK_MAX_DEVICES || virtio_blk_count >= VIRTIO_BLK_MAX_DEVICES) {
+		errorf("virtio_blk_init: too many devices");
+		return -1;
+	}
+
+	struct virtio_blk_device *blk = kzalloc(sizeof(*blk));
+	if (!blk) {
 		errorf("virtio_blk_init: failed to allocate device");
 		return -1;
 	}
 
-	virtio_blk->vdev.regs = regs;
-	virtio_blk->vdev.irqno = raw.irqno;
-	virtio_blk->vdev.lock = SPINLOCK_INITIALIZER("virtio_blk");
-	virtio_blk->vdev.polling_mode = true;
+	blk->vdev.regs = regs;
+	blk->vdev.irqno = irqno;
+	blk->vdev.lock = SPINLOCK_INITIALIZER("virtio_blk");
+	blk->vdev.polling_mode = true;
 
-	if (virtio_mmio_init(&virtio_blk->vdev) < 0) {
-		kfree(virtio_blk);
+	if (virtio_mmio_init(&blk->vdev) < 0) {
+		kfree(blk);
 		return -1;
 	}
 
@@ -205,84 +221,88 @@ int virtio_blk_init(void)
 		       VIRTIO_F_ANY_LAYOUT | VIRTIO_RING_F_INDIRECT_DESC |
 		       VIRTIO_RING_F_EVENT_IDX;
 
-	if (virtio_negotiate_features(&virtio_blk->vdev, required, rejected) <
-	    0) {
-		kfree(virtio_blk);
+	if (virtio_negotiate_features(&blk->vdev, required, rejected) < 0) {
+		kfree(blk);
 		return -1;
 	}
 
-	if (virtio_setup_vq(&virtio_blk->vdev, 0, VIRTQ_SIZE) < 0) {
-		kfree(virtio_blk);
+	if (virtio_setup_vq(&blk->vdev, 0, VIRTQ_SIZE) < 0) {
+		kfree(blk);
 		return -1;
 	}
 
-	u32 capacity_lo = virtio_read_config(&virtio_blk->vdev, 0);
-	u32 capacity_hi = virtio_read_config(&virtio_blk->vdev, 4);
-	virtio_blk->capacity = ((u64)capacity_hi << 32) | capacity_lo;
-	virtio_blk->block_size = virtio_read_config(&virtio_blk->vdev, 20);
-	if (virtio_blk->block_size == 0) {
-		virtio_blk->block_size = BLOCK_SIZE;
+	u32 capacity_lo = virtio_read_config(&blk->vdev, 0);
+	u32 capacity_hi = virtio_read_config(&blk->vdev, 4);
+	blk->capacity = ((u64)capacity_hi << 32) | capacity_lo;
+	blk->block_size = virtio_read_config(&blk->vdev, 20);
+	if (blk->block_size == 0) {
+		blk->block_size = BLOCK_SIZE;
 	}
 
-	virtio_set_status(&virtio_blk->vdev,
-			  virtio_get_status(&virtio_blk->vdev) |
+	virtio_set_status(&blk->vdev,
+			  virtio_get_status(&blk->vdev) |
 			      VIRTIO_CONFIG_S_DRIVER_OK);
 
 	virtio_blk_ops.read = virtio_blk_read;
 	virtio_blk_ops.write = virtio_blk_write;
 
-	virtio_blk->blk_dev.devno = MKDEV(BLK_MAJOR_VIRTIO, 0);
-	snprintf(virtio_blk->blk_dev.name, 16, "virtio-blk");
-	virtio_blk->blk_dev.ops = &virtio_blk_ops;
-	virtio_blk->blk_dev.private = virtio_blk;
-	virtio_blk->blk_dev.lock = SPINLOCK_INITIALIZER("blk_virtio");
+	blk->blk_dev.devno = MKDEV(BLK_MAJOR_VIRTIO, minor);
+	snprintf(blk->blk_dev.name, 16, "virtio-blk%d", minor);
+	blk->blk_dev.ops = &virtio_blk_ops;
+	blk->blk_dev.private = blk;
+	blk->blk_dev.lock = SPINLOCK_INITIALIZER("blk_virtio");
 
-	if (blk_register(&virtio_blk->blk_dev) < 0) {
+	if (blk_register(&blk->blk_dev) < 0) {
 		errorf("virtio_blk_init: failed to register block device");
-		kfree(virtio_blk);
+		kfree(blk);
 		return -1;
 	}
 
-	// TODO: enable PLIC interrupt after fixing PLIC init order
-	// plic_set_priority(raw.irqno, 1);
-	// plic_enable('S', r_mhartid(), raw.irqno);
+	virtio_blks[minor] = blk;
+	virtio_blk_count++;
 
-	infof("virtio_blk_init: device ready, capacity=%llu sectors, "
-	      "block_size=%d",
-	      virtio_blk->capacity, virtio_blk->block_size);
+	infof("virtio_blk_init: device %d ready, capacity=%llu sectors, "
+	      "block_size=%d, irqno=%d",
+	      minor, blk->capacity, blk->block_size, irqno);
 
 	return 0;
 }
 
-void virtio_disk_test(void)
+/*
+ * 探测并初始化所有 Virtio 块设备
+ * 遍历所有 MMIO 槽位，找到类型为 DISK 的设备并初始化
+ * @return: 成功初始化的设备数量
+ */
+int virtio_blk_init_all(void)
 {
-	infof("=== virtio disk test ===");
+	int count = 0;
 
-	u8 buf[512];
-	dev_t devno = MKDEV(BLK_MAJOR_VIRTIO, 0);
+	/* 遍历所有 VirtIO MMIO 槽位 (QEMU virt 机器有 8 个) */
+	struct virtio_mmio_raw slots[] = {
+		VIRTIO_MMIO_0, VIRTIO_MMIO_1, VIRTIO_MMIO_2,
+		VIRTIO_MMIO_3, VIRTIO_MMIO_4, VIRTIO_MMIO_5,
+		VIRTIO_MMIO_6, VIRTIO_MMIO_7,
+	};
 
-	infof("Testing blk_read...");
-	int ret = blk_read(devno, 0, buf, 1);
-	if (ret < 0) {
-		errorf("blk_read failed");
-		return;
+	for (int i = 0; i < 8; i++) {
+		struct virtio_mmio_regs *regs = (void *)slots[i].addr;
+		u32 magic = mmio_read32(&regs->magic_value);
+
+		if (magic != 0x74726976)
+			continue;
+
+		u32 device_id = mmio_read32(&regs->device_id);
+		if (device_id == 0)
+			continue;
+
+		if (device_id == VIRTIO_DEVICE_TYPE_DISK) {
+			if (virtio_blk_init_one(slots[i].addr, slots[i].irqno, count) == 0) {
+				count++;
+			}
+		}
+		/* 非 DISK 设备（如网络设备）跳过，后续扩展 */
 	}
 
-	infof("First 16 bytes of sector 0:");
-	for (int i = 0; i < 16; i++) {
-		printf("%02x ", buf[i]);
-	}
-	printf("\n");
-
-	infof("Testing bcache...");
-	struct buf *b = bread(devno, 0);
-	if (b) {
-		infof("bcache read successful, refcnt=%d", b->refcnt);
-		infof("bcache data: %02x %02x %02x %02x", b->data[0],
-		      b->data[1], b->data[2], b->data[3]);
-		brelse(b);
-		infof("bcache released");
-	}
-
-	infof("=== virtio disk test complete ===");
+	infof("virtio_blk_init_all: %d block device(s) initialized", count);
+	return count;
 }
