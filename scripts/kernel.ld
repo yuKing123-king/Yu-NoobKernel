@@ -12,7 +12,7 @@ SECTIONS
         *(.text.entry)
         *(.text .text.*)
         . = ALIGN(4K);
-        *(.text.trampsec)
+        *(trampsec)
         . = ALIGN(4K);
     }
 
@@ -27,8 +27,9 @@ SECTIONS
     e_rodata = .;
     s_data = .;
     .data : {
-
+        s_init = .;
         *(.data.apps)
+        e_init = .;
         *(.data .data.*)
         *(.sdata .sdata.*)
     }
