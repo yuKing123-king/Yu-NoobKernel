@@ -31,6 +31,11 @@ struct slab {
 	u8 bm_data[];
 };
 
+/*
+ * 计算一个slab块中能容纳的对象数量
+ * @param obj_size: 每个对象的大小（字节）
+ * @return: 对象数量
+ */
 static u32 object_num(u32 obj_size)
 {
 	size_t D = 8 * obj_size + 1;
@@ -38,9 +43,20 @@ static u32 object_num(u32 obj_size)
 	return (u32)(N / D);
 }
 
+/*
+ * 判断slab是否全部空闲（无已分配对象）
+ * @param s: slab结构体指针
+ * @return: 全部空闲返回true，否则返回false
+ */
 static inline bool slab_empty(struct slab *s) { return (s->total == s->free); }
 
 // 上层确保alloc_size对指令宽度对齐
+/*
+ * 初始化一个slab块：设置页面标志、元数据、位图和空闲链表
+ * @param kmem: 所属的kmem_cache缓存
+ * @param blob: slub块的起始地址
+ * @return: 无返回值
+ */
 static void slab_init(struct kmem_cache *kmem, void *blob)
 {
 	for (uintptr_t p = 0; p < SLAB_BLOB_SIZE; p += PAGE_SIZE) {
@@ -68,6 +84,11 @@ static void slab_init(struct kmem_cache *kmem, void *blob)
 	slab_log("inited %p - %p", blob, blob + SLAB_BLOB_SIZE);
 }
 
+/*
+ * 销毁一个slab块：清除页面标志、从链表移除并归还给buddy系统
+ * @param s: 待销毁的slab结构体指针
+ * @return: 无返回值
+ */
 static void slab_destroy(struct slab *s)
 {
 	void *blob = s;
@@ -84,6 +105,11 @@ static void slab_destroy(struct slab *s)
 	buddy_free(blob);
 }
 
+/*
+ * 从指定slab中分配一个对象
+ * @param s: slab结构体指针
+ * @return: 分配的对象地址
+ */
 static void *slab_alloc(struct slab *s)
 {
 	s->free--;
@@ -100,7 +126,11 @@ static void *slab_alloc(struct slab *s)
 	return (void *)((uintptr_t)s + s->offset + idx * s->kmem->alloc_size);
 }
 
-// 上层确保addr属于slab内存，且s->kmem有效
+/*
+ * 释放slab中的对象，更新位图和空闲计数（调用者需确保addr属于slab内存）
+ * @param addr: 待释放的对象地址
+ * @return: 无返回值
+ */
 static void slab_free(void *addr)
 {
 	struct slab *s = (void *)SLAB_ALIGN_DOWN(addr);
@@ -131,6 +161,14 @@ static void slab_free(void *addr)
 	slab_log("%s freed %p", s->kmem->name, addr);
 }
 
+/*
+ * 初始化kmem_cache缓存，可选择是否立即分配首个slab块
+ * @param kmem: 待初始化的kmem_cache指针
+ * @param name: 缓存名称
+ * @param obj_size: 对象大小（字节）
+ * @param with_initial_alloc: 是否立即从buddy系统中分配初始slab块
+ * @return: 成功返回0，失败返回负错误码
+ */
 int kmem_cache_init(struct kmem_cache *kmem, const char *name, size_t obj_size,
 		    bool with_initial_alloc)
 {
@@ -162,6 +200,11 @@ int kmem_cache_init(struct kmem_cache *kmem, const char *name, size_t obj_size,
 	return 0;
 }
 
+/*
+ * 从kmem_cache中分配一个对象（不加锁，由调用者保证同步）
+ * @param kmem: kmem_cache指针
+ * @return: 分配的对象地址，空闲不足时返回NULL
+ */
 static void *kmem_cache_alloc_nolock(struct kmem_cache *kmem)
 {
 	struct slab *slab;
@@ -215,6 +258,11 @@ static void *kmem_cache_alloc_nolock(struct kmem_cache *kmem)
 	return mem;
 }
 
+/*
+ * 从kmem_cache中分配一个对象（对外接口，带锁保护）
+ * @param kmem: kmem_cache指针
+ * @return: 分配的对象地址，失败返回NULL
+ */
 void *kmem_cache_alloc(struct kmem_cache *kmem)
 {
 	if (unlikely(!kmem))
@@ -230,7 +278,11 @@ void *kmem_cache_alloc(struct kmem_cache *kmem)
 	return mem;
 }
 
-// 上层确保地址合理，且对应page有PM_SLAB标志
+/*
+ * 释放kmem_cache中的对象（调用者需确保地址有效并属于slab内存）
+ * @param addr: 待释放的对象地址
+ * @return: 无返回值
+ */
 void kmem_cache_free(void *addr)
 {
 	struct slab *slab = (void *)SLAB_ALIGN_DOWN(addr), *n;
@@ -246,6 +298,11 @@ void kmem_cache_free(void *addr)
 	}
 }
 
+/*
+ * 回收kmem_cache中空闲的slab块，将完全空闲的slab移入空闲链表
+ * @param kmem: kmem_cache指针
+ * @return: 无返回值
+ */
 void kmem_cache_flush(struct kmem_cache *kmem)
 {
 	if (unlikely(!kmem))

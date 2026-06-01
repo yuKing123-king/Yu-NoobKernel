@@ -15,6 +15,9 @@ static struct {
 	u32 count;
 } file_state;
 
+/*
+ * 初始化文件子系统（创建slab缓存和链表）
+ */
 void file_init(void)
 {
 	if (kmem_cache_init(&file_cache, "file", sizeof(struct file), false) !=
@@ -29,6 +32,10 @@ void file_init(void)
 	infof("file initialized");
 }
 
+/*
+ * 分配并初始化一个新的file结构
+ * @return: 成功返回file结构指针，失败返回错误指针
+ */
 struct file *file_alloc(void)
 {
 	struct file *file = kmem_cache_alloc(&file_cache);
@@ -55,6 +62,10 @@ struct file *file_alloc(void)
 	return file;
 }
 
+/*
+ * 释放file结构占用的内存
+ * @param file: 待释放的file结构指针
+ */
 void file_free(struct file *file)
 {
 	if (!file) {
@@ -69,6 +80,12 @@ void file_free(struct file *file)
 	kmem_cache_free(file);
 }
 
+/*
+ * 基于dentry打开一个文件
+ * @param dentry: 文件对应的dentry指针
+ * @param flags: 打开标志
+ * @return: 成功返回file结构指针，失败返回错误指针
+ */
 struct file *file_open(struct dentry *dentry, u32 flags)
 {
 	if (!dentry || !dentry->d_inode) {
@@ -105,6 +122,11 @@ struct file *file_open(struct dentry *dentry, u32 flags)
 	return file;
 }
 
+/*
+ * 关闭文件（减少引用计数，为0时释放资源并调用release回调）
+ * @param file: 待关闭的file结构指针
+ * @return: 成功返回0，失败返回负的错误码
+ */
 int file_close(struct file *file)
 {
 	if (!file) {
@@ -133,6 +155,13 @@ int file_close(struct file *file)
 	return 0;
 }
 
+/*
+ * 从文件中读取数据
+ * @param file: 文件结构指针
+ * @param buf: 读取缓冲区
+ * @param count: 要读取的字节数
+ * @return: 成功返回实际读取的字节数，失败返回负的错误码
+ */
 ssize_t file_read(struct file *file, void *buf, size_t count)
 {
 	if (!file || !buf || count == 0) {
@@ -176,6 +205,13 @@ ssize_t file_read(struct file *file, void *buf, size_t count)
 	return ret;
 }
 
+/*
+ * 向文件中写入数据（支持追加模式）
+ * @param file: 文件结构指针
+ * @param buf: 写入数据缓冲区
+ * @param count: 要写入的字节数
+ * @return: 成功返回实际写入的字节数，失败返回负的错误码
+ */
 ssize_t file_write(struct file *file, const void *buf, size_t count)
 {
 	if (!file || !buf || count == 0) {
@@ -218,6 +254,13 @@ ssize_t file_write(struct file *file, const void *buf, size_t count)
 	return ret;
 }
 
+/*
+ * 调整文件读写位置（支持SEEK_SET/SEEK_CUR/SEEK_END）
+ * @param file: 文件结构指针
+ * @param offset: 偏移量
+ * @param whence: 基准位置
+ * @return: 成功返回新的文件位置，失败返回负的错误码
+ */
 loff_t file_lseek(struct file *file, loff_t offset, int whence)
 {
 	if (!file) {
@@ -268,6 +311,13 @@ loff_t file_lseek(struct file *file, loff_t offset, int whence)
 	return new_pos;
 }
 
+/*
+ * 读取目录文件中的目录项
+ * @param file: 目录文件结构指针
+ * @param buf: 存放目录项的缓冲区
+ * @param count: 缓冲区大小
+ * @return: 成功返回读取的字节数，失败返回负的错误码
+ */
 ssize_t file_getdents(struct file *file, struct dirent *buf, size_t count)
 {
 	if (!file || !buf || count == 0) {
@@ -295,6 +345,10 @@ ssize_t file_getdents(struct file *file, struct dirent *buf, size_t count)
 	return ret;
 }
 
+/*
+ * 增加file结构的引用计数
+ * @param file: file结构指针
+ */
 void file_get(struct file *file)
 {
 	if (!file) {
@@ -306,6 +360,10 @@ void file_get(struct file *file)
 	spinlock_release(&file->f_lock);
 }
 
+/*
+ * 减少file结构的引用计数，为0时自动关闭文件
+ * @param file: file结构指针
+ */
 void file_put(struct file *file)
 {
 	if (!file) {

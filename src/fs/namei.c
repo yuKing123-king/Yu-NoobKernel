@@ -9,6 +9,11 @@
 #include <misc/string.h>
 #include <mm/kalloc.h>
 
+/*
+ * 如果dentry是挂载点则跟随到挂载文件系统的根dentry
+ * @param dentry: 当前dentry指针
+ * @return: 如果是挂载点则返回挂载根dentry，否则返回原dentry
+ */
 static struct dentry *follow_mount(struct dentry *dentry)
 {
 	struct mount *mnt = vfs_lookup_mount(dentry);
@@ -20,6 +25,13 @@ static struct dentry *follow_mount(struct dentry *dentry)
 	return dentry;
 }
 
+/*
+ * 从路径中提取路径的第一个组件（直到遇到'/'或结束）
+ * @param path: 路径字符串
+ * @param name: 存放提取出的名称的缓冲区
+ * @param len: 输出名称长度
+ * @return: 成功返回0，失败返回负的错误码
+ */
 static int vfs_get_name(const char *path, char *name, u32 *len)
 {
 	if (!path || !name || !len) {
@@ -38,6 +50,11 @@ static int vfs_get_name(const char *path, char *name, u32 *len)
 	return 0;
 }
 
+/*
+ * 跳过路径字符串开头的所有斜杠'/'
+ * @param path: 路径字符串
+ * @return: 指向第一个非斜杠字符的指针，输入为NULL时返回NULL
+ */
 static const char *vfs_skip_slashes(const char *path)
 {
 	if (!path) {
@@ -51,6 +68,13 @@ static const char *vfs_skip_slashes(const char *path)
 	return path;
 }
 
+/*
+ * 在base目录下查找单个路径组件的dentry（先查缓存再调用文件系统lookup）
+ * @param base: 父目录dentry
+ * @param name: 待查找的文件名
+ * @param len: 文件名长度
+ * @return: 成功返回dentry指针，失败返回错误指针
+ */
 static struct dentry *vfs_lookup_single(struct dentry *base, const char *name,
 					u32 len)
 {
@@ -104,6 +128,12 @@ static struct dentry *vfs_lookup_single(struct dentry *base, const char *name,
 	return dentry;
 }
 
+/*
+ * 路径遍历主函数，逐组件解析路径直到末尾
+ * @param nd: 路径遍历上下文
+ * @param path: 待解析的路径字符串
+ * @return: 成功返回0，失败返回负的错误码
+ */
 int vfs_path_walk(struct nameidata *nd, const char *path)
 {
 	if (!nd || !path) {
@@ -174,6 +204,13 @@ int vfs_path_walk(struct nameidata *nd, const char *path)
 	return 0;
 }
 
+/*
+ * 解析路径字符串并返回对应的dentry
+ * @param base: 起始dentry（为NULL时使用根dentry）
+ * @param path: 待解析的路径
+ * @param flags: 查找标志
+ * @return: 成功返回目标dentry指针（引用计数已增加），失败返回错误指针
+ */
 struct dentry *vfs_path_lookup(struct dentry *base, const char *path, u32 flags)
 {
 	if (!path) {
@@ -205,6 +242,13 @@ struct dentry *vfs_path_lookup(struct dentry *base, const char *path, u32 flags)
 	return nd.dentry;
 }
 
+/*
+ * 在base目录下查找一个路径组件（不进行完整路径遍历）
+ * @param base: 父目录dentry
+ * @param name: 待查找的文件名
+ * @param len: 文件名长度
+ * @return: 成功返回dentry指针，失败返回错误指针
+ */
 struct dentry *vfs_lookup_one_len(struct dentry *base, const char *name,
 				  u32 len)
 {
@@ -215,6 +259,14 @@ struct dentry *vfs_lookup_one_len(struct dentry *base, const char *name,
 	return vfs_lookup_single(base, name, len);
 }
 
+/*
+ * 解析路径，返回父目录dentry和最后一个路径组件的名称
+ * @param base: 起始dentry（为NULL时使用根dentry）
+ * @param path: 待解析的路径
+ * @param parent: 输出父目录的path结构
+ * @param last: 输出最后一个路径组件的名称
+ * @return: 成功返回0，失败返回负的错误码
+ */
 int vfs_path_parent(struct dentry *base, const char *path, struct path *parent,
 		    struct qstr *last)
 {

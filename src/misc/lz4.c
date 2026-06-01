@@ -10,8 +10,19 @@
 #define LZ4_HASH_FUNCTION(v)                                                   \
 	(((v) * 2654435761U) >> ((32 - LZ4_HASHLOG) - LZ4_MINMATCH))
 
+/*
+ * 从内存地址读取 32 位无符号整数
+ * @param ptr: 内存指针
+ * @return: 读取的 32 位值
+ */
 static inline u32 lz4_read32(const void *ptr) { return *(const u32 *)ptr; }
 
+/*
+ * 写入 Literal 长度字段到输出流（LZ4 格式编码）
+ * @param op: 输出位置指针
+ * @param literal_len: Literal 长度
+ * @return: 写入的字节数
+ */
 static inline size_t lz4_write_literal(u8 *op, size_t literal_len)
 {
 	size_t written = 0;
@@ -32,6 +43,12 @@ static inline size_t lz4_write_literal(u8 *op, size_t literal_len)
 	return written;
 }
 
+/*
+ * 写入 Match 长度字段到输出流（LZ4 格式编码）
+ * @param op: 输出位置指针
+ * @param match_len: 匹配长度
+ * @return: 写入的字节数
+ */
 static inline size_t lz4_write_matchlen(u8 *op, size_t match_len)
 {
 	size_t written = 0;
@@ -53,6 +70,16 @@ static inline size_t lz4_write_matchlen(u8 *op, size_t match_len)
 	return written;
 }
 
+/*
+ * LZ4 通用压缩核心实现
+ * 使用哈希表查找匹配，支持加速参数控制匹配搜索步长
+ * @param src: 源数据指针
+ * @param src_size: 源数据大小
+ * @param dst: 目标缓冲区指针
+ * @param dst_capacity: 目标缓冲区容量
+ * @param acceleration: 加速因子（值越大压缩比越低但速度越快）
+ * @return: 压缩后数据大小，失败返回 -1
+ */
 static int lz4_compress_generic(const u8 *src, int src_size, u8 *dst,
 				int dst_capacity, int acceleration)
 {
@@ -167,11 +194,28 @@ _last_literals: {
 	return (int)(op - dst);
 }
 
+/*
+ * LZ4 压缩（默认加速因子为 1）
+ * @param src: 源数据指针
+ * @param src_size: 源数据大小
+ * @param dst: 目标缓冲区指针
+ * @param dst_capacity: 目标缓冲区容量
+ * @return: 压缩后数据大小，失败返回 -1
+ */
 int lz4_compress(const void *src, int src_size, void *dst, int dst_capacity)
 {
 	return lz4_compress_fast(src, src_size, dst, dst_capacity, 1);
 }
 
+/*
+ * LZ4 快速压缩（可指定加速因子）
+ * @param src: 源数据指针
+ * @param src_size: 源数据大小
+ * @param dst: 目标缓冲区指针
+ * @param dst_capacity: 目标缓冲区容量
+ * @param acceleration: 加速因子
+ * @return: 压缩后数据大小，失败返回 -1
+ */
 int lz4_compress_fast(const void *src, int src_size, void *dst,
 		      int dst_capacity, int acceleration)
 {
@@ -186,6 +230,14 @@ int lz4_compress_fast(const void *src, int src_size, void *dst,
 				    dst_capacity, acceleration);
 }
 
+/*
+ * LZ4 解压缩
+ * @param src: 压缩数据指针
+ * @param src_size: 压缩数据大小
+ * @param dst: 目标缓冲区指针
+ * @param dst_capacity: 目标缓冲区容量
+ * @return: 解压后数据大小，失败返回 -1
+ */
 int lz4_decompress(const void *src, int src_size, void *dst, int dst_capacity)
 {
 	const u8 *ip = (const u8 *)src;

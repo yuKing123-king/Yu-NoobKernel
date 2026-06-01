@@ -79,6 +79,11 @@ static const u64 sha512_init_state[8] = {
     0xa54ff53a5f1d36f1ULL, 0x510e527fade682d1ULL, 0x9b05688c2b3e6c1fULL,
     0x1f83d9abfb41bd6bULL, 0x5be0cd19137e2179ULL};
 
+/*
+ * SHA-256 压缩函数，处理一个 64 字节的数据块
+ * @param ctx: SHA-256 上下文指针
+ * @param data: 64 字节的数据块
+ */
 static void sha256_transform(struct sha256_ctx *ctx, const u8 *data)
 {
 	u32 w[64];
@@ -126,6 +131,11 @@ static void sha256_transform(struct sha256_ctx *ctx, const u8 *data)
 	ctx->state[7] += h;
 }
 
+/*
+ * SHA-512 压缩函数，处理一个 128 字节的数据块
+ * @param ctx: SHA-512 上下文指针
+ * @param data: 128 字节的数据块
+ */
 static void sha512_transform(struct sha512_ctx *ctx, const u8 *data)
 {
 	u64 w[80];
@@ -173,17 +183,32 @@ static void sha512_transform(struct sha512_ctx *ctx, const u8 *data)
 	ctx->state[7] += h;
 }
 
+/*
+ * 初始化 SHA-224 上下文
+ * @param ctx: SHA-224 上下文指针
+ */
 void sha224_init(struct sha256_ctx *ctx)
 {
 	memcpy(ctx->state, sha224_init_state, sizeof(ctx->state));
 	ctx->count = 0;
 }
 
+/*
+ * SHA-224 更新（追加数据到哈希计算中）
+ * @param ctx: SHA-224 上下文指针
+ * @param data: 输入数据指针
+ * @param len: 数据长度
+ */
 void sha224_update(struct sha256_ctx *ctx, const void *data, size_t len)
 {
 	sha256_update(ctx, data, len);
 }
 
+/*
+ * 完成 SHA-224 哈希计算并输出摘要（取 SHA-256 摘要的前 SHA224_DIGEST_SIZE 字节）
+ * @param ctx: SHA-224 上下文指针
+ * @param digest: 输出摘要缓冲区
+ */
 void sha224_final(struct sha256_ctx *ctx, u8 *digest)
 {
 	u8 tmp[SHA256_DIGEST_SIZE];
@@ -191,12 +216,22 @@ void sha224_final(struct sha256_ctx *ctx, u8 *digest)
 	memcpy(digest, tmp, SHA224_DIGEST_SIZE);
 }
 
+/*
+ * 初始化 SHA-256 上下文
+ * @param ctx: SHA-256 上下文指针
+ */
 void sha256_init(struct sha256_ctx *ctx)
 {
 	memcpy(ctx->state, sha256_init_state, sizeof(ctx->state));
 	ctx->count = 0;
 }
 
+/*
+ * SHA-256 更新（追加数据到哈希计算中）
+ * @param ctx: SHA-256 上下文指针
+ * @param data: 输入数据指针
+ * @param len: 数据长度
+ */
 void sha256_update(struct sha256_ctx *ctx, const void *data, size_t len)
 {
 	const u8 *p = data;
@@ -228,6 +263,12 @@ void sha256_update(struct sha256_ctx *ctx, const void *data, size_t len)
 	}
 }
 
+/*
+ * 完成 SHA-256 哈希计算并输出摘要
+ * 执行填充、附加长度位并输出 32 字节摘要
+ * @param ctx: SHA-256 上下文指针
+ * @param digest: 输出摘要缓冲区
+ */
 void sha256_final(struct sha256_ctx *ctx, u8 *digest)
 {
 	size_t buf_used = ctx->count & 0x3f;
@@ -264,6 +305,10 @@ void sha256_final(struct sha256_ctx *ctx, u8 *digest)
 	}
 }
 
+/*
+ * 初始化 SHA-384 上下文
+ * @param ctx: SHA-384 上下文指针
+ */
 void sha384_init(struct sha512_ctx *ctx)
 {
 	memcpy(ctx->state, sha384_init_state, sizeof(ctx->state));
@@ -271,11 +316,22 @@ void sha384_init(struct sha512_ctx *ctx)
 	ctx->count[1] = 0;
 }
 
+/*
+ * SHA-384 更新（追加数据到哈希计算中）
+ * @param ctx: SHA-384 上下文指针
+ * @param data: 输入数据指针
+ * @param len: 数据长度
+ */
 void sha384_update(struct sha512_ctx *ctx, const void *data, size_t len)
 {
 	sha512_update(ctx, data, len);
 }
 
+/*
+ * 完成 SHA-384 哈希计算并输出摘要（取 SHA-512 摘要的前 SHA384_DIGEST_SIZE 字节）
+ * @param ctx: SHA-384 上下文指针
+ * @param digest: 输出摘要缓冲区
+ */
 void sha384_final(struct sha512_ctx *ctx, u8 *digest)
 {
 	u8 tmp[SHA512_DIGEST_SIZE];
@@ -283,6 +339,10 @@ void sha384_final(struct sha512_ctx *ctx, u8 *digest)
 	memcpy(digest, tmp, SHA384_DIGEST_SIZE);
 }
 
+/*
+ * 初始化 SHA-512 上下文
+ * @param ctx: SHA-512 上下文指针
+ */
 void sha512_init(struct sha512_ctx *ctx)
 {
 	memcpy(ctx->state, sha512_init_state, sizeof(ctx->state));
@@ -290,6 +350,12 @@ void sha512_init(struct sha512_ctx *ctx)
 	ctx->count[1] = 0;
 }
 
+/*
+ * SHA-512 更新（追加数据到哈希计算中）
+ * @param ctx: SHA-512 上下文指针
+ * @param data: 输入数据指针
+ * @param len: 数据长度
+ */
 void sha512_update(struct sha512_ctx *ctx, const void *data, size_t len)
 {
 	const u8 *p = data;
@@ -324,6 +390,12 @@ void sha512_update(struct sha512_ctx *ctx, const void *data, size_t len)
 	}
 }
 
+/*
+ * 完成 SHA-512 哈希计算并输出摘要
+ * 执行填充、附加长度位并输出 64 字节摘要
+ * @param ctx: SHA-512 上下文指针
+ * @param digest: 输出摘要缓冲区
+ */
 void sha512_final(struct sha512_ctx *ctx, u8 *digest)
 {
 	size_t buf_used = ctx->count[0] & 0x7f;
@@ -373,6 +445,12 @@ void sha512_final(struct sha512_ctx *ctx, u8 *digest)
 	}
 }
 
+/*
+ * 一次性计算 SHA-224 哈希摘要
+ * @param data: 输入数据指针
+ * @param len: 数据长度
+ * @param digest: 输出摘要缓冲区
+ */
 void sha224(const void *data, size_t len, u8 *digest)
 {
 	struct sha256_ctx ctx;
@@ -381,6 +459,12 @@ void sha224(const void *data, size_t len, u8 *digest)
 	sha224_final(&ctx, digest);
 }
 
+/*
+ * 一次性计算 SHA-256 哈希摘要
+ * @param data: 输入数据指针
+ * @param len: 数据长度
+ * @param digest: 输出摘要缓冲区
+ */
 void sha256(const void *data, size_t len, u8 *digest)
 {
 	struct sha256_ctx ctx;
@@ -389,6 +473,12 @@ void sha256(const void *data, size_t len, u8 *digest)
 	sha256_final(&ctx, digest);
 }
 
+/*
+ * 一次性计算 SHA-384 哈希摘要
+ * @param data: 输入数据指针
+ * @param len: 数据长度
+ * @param digest: 输出摘要缓冲区
+ */
 void sha384(const void *data, size_t len, u8 *digest)
 {
 	struct sha512_ctx ctx;
@@ -397,6 +487,12 @@ void sha384(const void *data, size_t len, u8 *digest)
 	sha384_final(&ctx, digest);
 }
 
+/*
+ * 一次性计算 SHA-512 哈希摘要
+ * @param data: 输入数据指针
+ * @param len: 数据长度
+ * @param digest: 输出摘要缓冲区
+ */
 void sha512(const void *data, size_t len, u8 *digest)
 {
 	struct sha512_ctx ctx;

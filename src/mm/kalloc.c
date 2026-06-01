@@ -21,6 +21,11 @@ const size_t MEM_OBJ_SIZES[] = {8,   16,   24,	 32,   48,   64,
 #define KALLOC_MAX_MEM_OBJ_SIZE MEM_OBJ_SIZES[KALLOC_MEM_POOL_NUM - 1]
 static struct kmem_cache kalloc_mem_pool[KALLOC_MEM_POOL_NUM][CPU_NUM];
 
+/*
+ * 根据分配大小查找对应的内存池索引
+ * @param size: 分配大小（字节）
+ * @return: 对应的MEM_OBJ_SIZES数组索引
+ */
 static int size2index(size_t size)
 {
 	int i = 0;
@@ -31,6 +36,10 @@ static int size2index(size_t size)
 	return i;
 }
 
+/*
+ * 初始化kalloc系统：为每个CPU创建所有大小的kmem_cache内存池
+ * @return: 无返回值
+ */
 void kalloc_init()
 {
 	for (int i = 0; i < CPU_NUM; i++) {
@@ -38,13 +47,22 @@ void kalloc_init()
 			char *name = early_alloc(24);
 			snprintf(name, 24, "kmalloc-%zu<%d>", MEM_OBJ_SIZES[j],
 				 i);
-			kmem_cache_init(&kalloc_mem_pool[j][i], name,
+			int ret = kmem_cache_init(&kalloc_mem_pool[j][i], name,
 					MEM_OBJ_SIZES[j], true);
+			if (ret)
+				warnf("kalloc_init: %s init failed (ret=%d), "
+				      "will retry on first alloc",
+				      name, ret);
 		}
 	}
 	kalloc_inited = true;
 }
 
+/*
+ * 分配指定大小的内存（通用内存分配接口）
+ * @param size: 分配大小（字节）
+ * @return: 分配的内存地址，失败返回NULL
+ */
 void *kmalloc(size_t size)
 {
 	if (unlikely(size == 0)) {
@@ -59,6 +77,11 @@ void *kmalloc(size_t size)
 	return NULL;
 }
 
+/*
+ * 分配指定大小的内存并清零
+ * @param size: 分配大小（字节）
+ * @return: 分配的已清零内存地址，失败返回NULL
+ */
 void *kzalloc(size_t size)
 {
 	void *ptr = kmalloc(size);
@@ -68,6 +91,12 @@ void *kzalloc(size_t size)
 	return ptr;
 }
 
+/*
+ * 分配指定数量的元素内存并清零（带溢出检查）
+ * @param nitems: 元素数量
+ * @param size: 每个元素的大小（字节）
+ * @return: 分配的已清零内存地址，失败返回NULL
+ */
 void *kcalloc(size_t nitems, size_t size)
 {
 	if (nitems && size > SIZE_MAX / nitems) {
@@ -77,12 +106,23 @@ void *kcalloc(size_t nitems, size_t size)
 	return kzalloc(nitems * size);
 }
 
+/*
+ * 重新分配内存（先释放旧内存，再分配新内存）
+ * @param ptr: 旧内存地址
+ * @param size: 新内存大小（字节）
+ * @return: 新分配的内存地址，失败返回NULL
+ */
 void *krealloc(void *ptr, size_t size)
 {
 	kfree(ptr);
 	return kmalloc(size); // 重新分配内存
 }
 
+/*
+ * 释放由kmalloc/kzalloc/kcalloc分配的内存（自动判断slab或buddy）
+ * @param addr: 待释放的内存地址
+ * @return: 无返回值
+ */
 void kfree(void *addr)
 {
 	struct page *page = addr2page((void *)PAGE_ALIGN_DOWN((uintptr_t)addr));
@@ -105,11 +145,21 @@ void kfree(void *addr)
 
 // 简易 LCG 随机（确定性，便于复现）
 static uint32_t kmalloc_test_seed = 0xCAFEBABE;
+/*
+ * 生成一个32位伪随机数（LCG算法，确定性序列便于复现）
+ * @return: 32位伪随机数
+ */
 static inline uint32_t rand32(void)
 {
 	kmalloc_test_seed = kmalloc_test_seed * 1664525U + 1013904223U;
 	return kmalloc_test_seed;
 }
+/*
+ * 在[min, max]范围内生成随机大小
+ * @param min: 最小值
+ * @param max: 最大值
+ * @return: 范围内的随机值
+ */
 static inline size_t rand_size(size_t min, size_t max)
 {
 	if (min >= max)
@@ -127,6 +177,13 @@ static inline size_t rand_size(size_t min, size_t max)
 	} while (0)
 
 // 校验内存未被破坏（写已知 pattern + 读验证）
+/*
+ * 对内存写入测试标记并立即校验（用于检测内存越界）
+ * @param p: 内存起始地址
+ * @param sz: 内存大小（字节）
+ * @param poison: 测试填充值
+ * @return: 无返回值
+ */
 static void poison_and_check(void *p, size_t sz, uint8_t poison)
 {
 	if (sz == 0 || !p)
@@ -146,6 +203,10 @@ static void poison_and_check(void *p, size_t sz, uint8_t poison)
 		TEST_ASSERT(v[sz / 2] == poison, "mid corrupted");
 }
 
+/*
+ * kmalloc系统综合测试函数：覆盖零大小分配、slab范围、buddy大块、高压混合、碎片回收等场景
+ * @return: 无返回值
+ */
 void kalloc_test(void)
 {
 	printf("=== kmalloc STRESS & CORRECTNESS TEST (slab + buddy) ===\n");

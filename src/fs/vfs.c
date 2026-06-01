@@ -14,6 +14,9 @@ static struct {
 	struct mount *root_mount;
 } vfs_state;
 
+/*
+ * 初始化VFS层，包括超级块、inode、dentry和文件子系统
+ */
 void vfs_init(void)
 {
 	INIT_LIST_HEAD(&vfs_state.fs_list);
@@ -30,6 +33,11 @@ void vfs_init(void)
 	infof("vfs initialized");
 }
 
+/*
+ * 注册一个文件系统类型到VFS
+ * @param fs: 文件系统类型结构指针
+ * @return: 成功返回0，失败返回负的错误码
+ */
 int register_filesystem(struct file_system_type *fs)
 {
 	if (!fs || !fs->name || !fs->mount) {
@@ -57,6 +65,11 @@ int register_filesystem(struct file_system_type *fs)
 	return 0;
 }
 
+/*
+ * 从VFS中注销一个文件系统类型
+ * @param fs: 文件系统类型结构指针
+ * @return: 成功返回0，失败返回负的错误码
+ */
 int unregister_filesystem(struct file_system_type *fs)
 {
 	if (!fs) {
@@ -87,6 +100,11 @@ int unregister_filesystem(struct file_system_type *fs)
 	return 0;
 }
 
+/*
+ * 根据名称查找已注册的文件系统类型
+ * @param name: 文件系统名称
+ * @return: 成功返回文件系统类型指针，未找到返回NULL
+ */
 struct file_system_type *get_fs(const char *name)
 {
 	if (!name) {
@@ -108,6 +126,13 @@ struct file_system_type *get_fs(const char *name)
 	return NULL;
 }
 
+/*
+ * 挂载一个文件系统
+ * @param fs_type: 文件系统类型指针
+ * @param dev: 设备号
+ * @param data: 挂载选项（可选）
+ * @return: 成功返回超级块指针，失败返回错误指针
+ */
 struct super_block *vfs_mount(struct file_system_type *fs_type, dev_t dev,
 			      void *data)
 {
@@ -129,6 +154,11 @@ struct super_block *vfs_mount(struct file_system_type *fs_type, dev_t dev,
 	return sb;
 }
 
+/*
+ * 卸载一个文件系统
+ * @param sb: 待卸载的超级块指针
+ * @return: 成功返回0，失败返回负的错误码
+ */
 int vfs_umount(struct super_block *sb)
 {
 	if (!sb) {
@@ -147,6 +177,12 @@ int vfs_umount(struct super_block *sb)
 	return 0;
 }
 
+/*
+ * 挂载根文件系统
+ * @param fs_type: 文件系统类型指针
+ * @param dev: 设备号
+ * @return: 成功返回0，失败返回负的错误码
+ */
 int vfs_mount_root(struct file_system_type *fs_type, dev_t dev)
 {
 	struct super_block *sb = vfs_mount(fs_type, dev, NULL);
@@ -178,6 +214,13 @@ int vfs_mount_root(struct file_system_type *fs_type, dev_t dev)
 	return 0;
 }
 
+/*
+ * 将文件系统挂载到指定路径
+ * @param target_path: 目标挂载点路径
+ * @param fs_type: 文件系统类型指针
+ * @param dev: 设备号
+ * @return: 成功返回0，失败返回负的错误码
+ */
 int vfs_mount_to(const char *target_path, struct file_system_type *fs_type,
 		 dev_t dev)
 {
@@ -236,6 +279,10 @@ int vfs_mount_to(const char *target_path, struct file_system_type *fs_type,
 	return 0;
 }
 
+/*
+ * 获取根文件系统的根dentry
+ * @return: 根dentry指针，未挂载时返回NULL
+ */
 struct dentry *vfs_get_root(void)
 {
 	spinlock_acquire(&vfs_state.lock);
@@ -245,6 +292,10 @@ struct dentry *vfs_get_root(void)
 	return root;
 }
 
+/*
+ * 获取根文件系统的mount结构
+ * @return: 根mount结构指针，未挂载时返回NULL
+ */
 struct mount *vfs_get_root_mount(void)
 {
 	spinlock_acquire(&vfs_state.lock);
@@ -253,6 +304,11 @@ struct mount *vfs_get_root_mount(void)
 	return mnt;
 }
 
+/*
+ * 根据挂载点dentry查找对应的mount结构
+ * @param mountpoint: 挂载点dentry指针
+ * @return: 成功返回mount结构指针，未找到返回NULL
+ */
 struct mount *vfs_lookup_mount(struct dentry *mountpoint)
 {
 	if (!mountpoint) {
@@ -277,6 +333,10 @@ struct mount *vfs_lookup_mount(struct dentry *mountpoint)
 	return NULL;
 }
 
+/*
+ * 增加mount结构的引用计数
+ * @param mnt: mount结构指针
+ */
 void vfs_mount_get(struct mount *mnt)
 {
 	if (!mnt) {
@@ -288,6 +348,10 @@ void vfs_mount_get(struct mount *mnt)
 	spinlock_release(&mnt->mnt_lock);
 }
 
+/*
+ * 减少mount结构的引用计数，引用为0时释放mount及相关资源
+ * @param mnt: mount结构指针
+ */
 void vfs_mount_put(struct mount *mnt)
 {
 	if (!mnt) {
@@ -326,6 +390,12 @@ void vfs_mount_put(struct mount *mnt)
 	spinlock_release(&mnt->mnt_lock);
 }
 
+/*
+ * 打开指定路径的文件，支持O_CREAT标志自动创建文件
+ * @param path: 文件路径
+ * @param flags: 打开标志（如O_RDONLY, O_CREAT等）
+ * @return: 成功返回file结构指针，失败返回错误指针
+ */
 struct file *vfs_open(const char *path, u32 flags)
 {
 	if (!path) {
@@ -426,23 +496,55 @@ struct file *vfs_open(const char *path, u32 flags)
 	return file;
 }
 
+/*
+ * 关闭文件，减少引用计数
+ * @param file: 待关闭的文件结构指针
+ * @return: 成功返回0，失败返回负的错误码
+ */
 int vfs_close(struct file *file) { return file_close(file); }
 
+/*
+ * 从文件中读取数据
+ * @param file: 文件结构指针
+ * @param buf: 读取缓冲区
+ * @param count: 要读取的字节数
+ * @return: 成功返回实际读取的字节数，失败返回负的错误码
+ */
 ssize_t vfs_read(struct file *file, void *buf, size_t count)
 {
 	return file_read(file, buf, count);
 }
 
+/*
+ * 向文件中写入数据
+ * @param file: 文件结构指针
+ * @param buf: 写入数据缓冲区
+ * @param count: 要写入的字节数
+ * @return: 成功返回实际写入的字节数，失败返回负的错误码
+ */
 ssize_t vfs_write(struct file *file, const void *buf, size_t count)
 {
 	return file_write(file, buf, count);
 }
 
+/*
+ * 调整文件读写位置
+ * @param file: 文件结构指针
+ * @param offset: 偏移量
+ * @param whence: 基准位置（SEEK_SET/SEEK_CUR/SEEK_END）
+ * @return: 成功返回新的文件位置，失败返回负的错误码
+ */
 loff_t vfs_lseek(struct file *file, loff_t offset, int whence)
 {
 	return file_lseek(file, offset, whence);
 }
 
+/*
+ * 创建目录
+ * @param path: 目录路径
+ * @param mode: 目录权限模式
+ * @return: 成功返回0，失败返回负的错误码
+ */
 int vfs_mkdir(const char *path, umode_t mode)
 {
 	if (!path) {
@@ -496,6 +598,11 @@ int vfs_mkdir(const char *path, umode_t mode)
 	return 0;
 }
 
+/*
+ * 删除指定路径的目录
+ * @param path: 待删除目录路径
+ * @return: 成功返回0，失败返回负的错误码
+ */
 int vfs_rmdir(const char *path)
 {
 	if (!path) {
@@ -534,6 +641,11 @@ int vfs_rmdir(const char *path)
 	return 0;
 }
 
+/*
+ * 删除指定路径的文件（硬链接）
+ * @param path: 待删除文件路径
+ * @return: 成功返回0，失败返回负的错误码
+ */
 int vfs_unlink(const char *path)
 {
 	if (!path) {
@@ -577,6 +689,12 @@ int vfs_unlink(const char *path)
 	return 0;
 }
 
+/*
+ * 创建一个新文件
+ * @param path: 文件路径
+ * @param mode: 文件权限模式
+ * @return: 成功返回0，失败返回负的错误码
+ */
 int vfs_create(const char *path, umode_t mode)
 {
 	if (!path) {
@@ -630,6 +748,12 @@ int vfs_create(const char *path, umode_t mode)
 	return 0;
 }
 
+/*
+ * 重命名文件或目录
+ * @param old_path: 原路径
+ * @param new_path: 新路径
+ * @return: 成功返回0，失败返回负的错误码
+ */
 int vfs_rename(const char *old_path, const char *new_path)
 {
 	if (!old_path || !new_path) {
@@ -704,6 +828,13 @@ int vfs_rename(const char *old_path, const char *new_path)
 	return 0;
 }
 
+/*
+ * 读取目录项
+ * @param file: 目录文件结构指针
+ * @param buf: 存放目录项的缓冲区
+ * @param count: 缓冲区大小
+ * @return: 成功返回读取的字节数，失败返回负的错误码
+ */
 ssize_t vfs_getdents(struct file *file, struct dirent *buf, size_t count)
 {
 	if (!file || !buf || count == 0) {
@@ -725,6 +856,12 @@ ssize_t vfs_getdents(struct file *file, struct dirent *buf, size_t count)
 	return file_getdents(file, buf, count);
 }
 
+/*
+ * 获取文件系统的统计信息
+ * @param path: 文件系统路径
+ * @param buf: 存放统计信息的缓冲区
+ * @return: 成功返回0，失败返回负的错误码
+ */
 int vfs_statfs(const char *path, struct statfs *buf)
 {
 	if (!path || !buf) {
@@ -766,8 +903,17 @@ int vfs_statfs(const char *path, struct statfs *buf)
 	return ret;
 }
 
+/*
+ * 同步所有文件系统（当前为空实现）
+ * @return: 始终返回0
+ */
 int vfs_sync(void) { return 0; }
 
+/*
+ * 同步文件的修改到磁盘
+ * @param file: 待同步的文件结构指针
+ * @return: 成功返回0，失败返回负的错误码
+ */
 int vfs_fsync(struct file *file)
 {
 	if (!file) {

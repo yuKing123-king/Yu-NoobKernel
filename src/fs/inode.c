@@ -16,6 +16,9 @@ static struct {
 	u32 count;
 } inode_state;
 
+/*
+ * 初始化inode子系统（创建slab缓存和哈希表）
+ */
 void inode_init(void)
 {
 	if (kmem_cache_init(&inode_cache, "inode", sizeof(struct inode),
@@ -34,6 +37,11 @@ void inode_init(void)
 	infof("inode initialized");
 }
 
+/*
+ * 分配并初始化一个新的inode
+ * @param sb: 所属超级块指针
+ * @return: 成功返回inode指针，失败返回错误指针
+ */
 struct inode *inode_alloc(struct super_block *sb)
 {
 	struct inode *inode;
@@ -76,6 +84,10 @@ struct inode *inode_alloc(struct super_block *sb)
 	return inode;
 }
 
+/*
+ * 释放inode占用的内存
+ * @param inode: 待释放的inode指针
+ */
 void inode_free(struct inode *inode)
 {
 	if (!inode) {
@@ -97,6 +109,12 @@ void inode_free(struct inode *inode)
 	kmem_cache_free(inode);
 }
 
+/*
+ * 获取指定inode号的inode（从缓存查找或新建）
+ * @param sb: 超级块指针
+ * @param ino: inode号
+ * @return: 成功返回inode指针（引用计数已增加），失败返回错误指针
+ */
 struct inode *inode_get(struct super_block *sb, ino_t ino)
 {
 	spinlock_acquire(&inode_state.lock);
@@ -126,6 +144,10 @@ struct inode *inode_get(struct super_block *sb, ino_t ino)
 	return inode;
 }
 
+/*
+ * 减少inode的引用计数，引用为0时释放inode
+ * @param inode: inode指针
+ */
 void inode_put(struct inode *inode)
 {
 	if (!inode) {
@@ -152,6 +174,11 @@ void inode_put(struct inode *inode)
 	spinlock_release(&inode->i_lock);
 }
 
+/*
+ * 根据inode号在全局哈希表中查找inode（不增加引用计数）
+ * @param ino: inode号
+ * @return: 成功返回inode指针，未找到返回NULL
+ */
 struct inode *inode_lookup(ino_t ino)
 {
 	spinlock_acquire(&inode_state.lock);
@@ -160,6 +187,10 @@ struct inode *inode_lookup(ino_t ino)
 	return inode;
 }
 
+/*
+ * 标记inode为脏（数据已修改待写回）
+ * @param inode: inode指针
+ */
 void inode_dirty(struct inode *inode)
 {
 	if (!inode) {
@@ -177,6 +208,11 @@ void inode_dirty(struct inode *inode)
 	spinlock_release(&inode->i_lock);
 }
 
+/*
+ * 将脏inode写回到磁盘
+ * @param inode: inode指针
+ * @return: 成功返回0，失败返回负的错误码
+ */
 int inode_write(struct inode *inode)
 {
 	if (!inode) {
@@ -205,6 +241,10 @@ int inode_write(struct inode *inode)
 	return ret;
 }
 
+/*
+ * 截断inode数据（清空大小和块数，标记为脏）
+ * @param inode: inode指针
+ */
 void inode_truncate(struct inode *inode)
 {
 	if (!inode) {

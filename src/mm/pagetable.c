@@ -6,6 +6,13 @@
 #include <mm/vm.h>
 #include <misc/align.h>
 
+/*
+ * 根据虚拟地址在页表中查找对应的页表项，可选择是否自动分配中间页表
+ * @param pagetable: 根页表指针
+ * @param va: 虚拟地址
+ * @param alloc: 是否在页表不存在时自动分配中间页表
+ * @return: 页表项指针，未找到且不分配时返回NULL
+ */
 pte_t *va2pte(pagetable_t pagetable, uintptr_t va, bool alloc)
 {
 	for (int level = 2; level > 0; level--) {
@@ -25,6 +32,12 @@ pte_t *va2pte(pagetable_t pagetable, uintptr_t va, bool alloc)
 	return &pagetable[PX(0, va)];
 }
 
+/*
+ * 通过页表将虚拟地址转换为物理地址（页对齐部分）
+ * @param pagetable: 根页表指针
+ * @param va: 虚拟地址
+ * @return: 对应的物理地址（页对齐），转换失败返回0
+ */
 uintptr_t walkaddr(pagetable_t pagetable, uintptr_t va)
 {
 	pte_t *pte;
@@ -42,8 +55,18 @@ uintptr_t walkaddr(pagetable_t pagetable, uintptr_t va)
 	return pa;
 }
 
+/*
+ * 创建一个新的根页表（分配一页并清零）
+ * @return: 新页表的指针
+ */
 pagetable_t pagetable_create() { return kzalloc(PAGE_SIZE); }
 
+/*
+ * 递归销毁指定级别的页表及其所有子页表
+ * @param pagetable: 当前级别页表指针
+ * @param level: 页表级别（0为叶子页表）
+ * @return: 无返回值
+ */
 static void pagetable_destroy_level(pagetable_t pagetable, int level)
 {
 	if (pagetable == NULL)
@@ -68,6 +91,11 @@ static void pagetable_destroy_level(pagetable_t pagetable, int level)
 	kfree(pagetable);
 }
 
+/*
+ * 销毁整个页表树（从根页表开始递归释放）
+ * @param pagetable: 根页表指针
+ * @return: 无返回值
+ */
 void pagetable_destroy(pagetable_t pagetable)
 {
 	if (pagetable == NULL)
@@ -75,24 +103,47 @@ void pagetable_destroy(pagetable_t pagetable)
 	pagetable_destroy_level(pagetable, 2); // Sv39 根页表是 level 2
 }
 
+/*
+ * 将连续的虚拟地址区间映射到物理地址区间
+ * @param pagetable: 根页表指针
+ * @param va: 起始虚拟地址（需页对齐）
+ * @param pa: 起始物理地址（需页对齐）
+ * @param npages: 映射的页数
+ * @param perm: 页权限标志
+ * @return: 成功返回0，失败返回负错误码
+ */
 int mappages(pagetable_t pagetable, uintptr_t va, uintptr_t pa, size_t npages,
 	     int perm)
 {
-	if (pagetable == NULL)
+	if (pagetable == NULL) {
+		warnf("mappages: NULL pagetable");
 		return -EINVAL;
-	if (!PAGE_ALIGNED(va) || !PAGE_ALIGNED(pa))
+	}
+	if (!PAGE_ALIGNED(va) || !PAGE_ALIGNED(pa)) {
+		warnf("mappages: unaligned va=%p pa=%p", va, pa);
 		return -EINVAL;
+	}
 	if (npages == 0)
 		return 0;
-	if (va + npages * PAGE_SIZE > VM_END)
+	if (va + npages * PAGE_SIZE > VM_END) {
+		warnf("mappages: va=%p out of range", va);
 		return -ERANGE;
-	if (pa + npages * PAGE_SIZE > PM_END)
+	}
+	if (pa + npages * PAGE_SIZE > PM_END) {
+		warnf("mappages: pa=%p out of range", pa);
 		return -ERANGE;
+	}
 	pte_t *pte;
 	perm &= 0x3f;
 	for (size_t i = 0; i < npages; i++) {
 		pte = va2pte(pagetable, va + i * PAGE_SIZE, true);
+		if (!pte) {
+			warnf("mappages: out of memory at va=%p",
+			      va + i * PAGE_SIZE);
+			return -ENOMEM;
+		}
 		if (*pte & PTE_M) {
+			warnf("mappages: va=%p already mapped", va + i * PAGE_SIZE);
 			return -EADDRINUSE;
 		}
 		*pte = PA2PTE(pa + i * PAGE_SIZE) | perm | PTE_M;
@@ -100,6 +151,13 @@ int mappages(pagetable_t pagetable, uintptr_t va, uintptr_t pa, size_t npages,
 	return 0;
 }
 
+/*
+ * 解除虚拟地址区间的页表映射
+ * @param pagetable: 根页表指针
+ * @param vm: 起始虚拟地址
+ * @param npages: 解除映射的页数
+ * @return: 成功返回0
+ */
 int unmappages(pagetable_t pagetable, uintptr_t vm, size_t npages)
 {
 	pte_t *pte;

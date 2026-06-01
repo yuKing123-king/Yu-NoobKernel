@@ -11,11 +11,21 @@ static struct {
 	spinlock_t lock;
 } bcache;
 
+/*
+ * 计算块设备号和块号对应的哈希值
+ * @param dev: 设备号
+ * @param blockno: 块号
+ * @return: 哈希桶索引
+ */
 static inline u32 bcache_hash(dev_t dev, u64 blockno)
 {
 	return (dev + blockno) % BCACHE_HASH_SIZE;
 }
 
+/*
+ * 初始化块缓存系统：初始化哈希表、LRU链表和所有缓冲区
+ * @return: 无返回值
+ */
 void bcache_init(void)
 {
 	spinlock_acquire(&bcache.lock);
@@ -43,6 +53,12 @@ void bcache_init(void)
 	      BCACHE_HASH_SIZE);
 }
 
+/*
+ * 在哈希表中查找指定设备号和块号的缓冲区
+ * @param dev: 设备号
+ * @param blockno: 块号
+ * @return: 找到的缓冲区指针，未找到返回NULL
+ */
 static struct buf *bcache_lookup(dev_t dev, u64 blockno)
 {
 	u32 hash = bcache_hash(dev, blockno);
@@ -58,6 +74,10 @@ static struct buf *bcache_lookup(dev_t dev, u64 blockno)
 	return NULL;
 }
 
+/*
+ * 从LRU链表中淘汰一个缓冲区（脏块会先写回磁盘）
+ * @return: 被淘汰的缓冲区指针，无可用缓冲区时返回NULL
+ */
 static struct buf *bcache_evict(void)
 {
 	struct buf *b;

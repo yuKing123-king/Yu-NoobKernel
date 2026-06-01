@@ -31,16 +31,30 @@ static struct plic_device plic = {
 	.raw = PLIC
 };
 
+/*
+ * 初始化PLIC设备，将PLIC寄存器基地址映射到内存中
+ */
 void plic_init(){
 	plic.regs = (void *)plic.raw.addr;
 }
 
+/*
+ * 设置指定中断源的优先级
+ * @param irqno: 中断号（必须大于0且小于PLIC_MAX_IRQ_NUM）
+ * @param priority: 优先级值
+ */
 void plic_set_priority(u32 irqno, u32 priority)
 {
 	assert(irqno > 0 && irqno < PLIC_MAX_IRQ_NUM);
 	plic.regs->priority[irqno] = priority;
 }
 
+/*
+ * 使能指定中断在指定HART上下文中的传递
+ * @param mode: 特权模式（'S'表示监督模式，'M'表示机器模式）
+ * @param hartid: HART编号
+ * @param irqno: 中断号
+ */
 void plic_enable(char mode, u64 hartid, u32 irqno)
 {
 	assert(mode == 'S' || mode == 'M');
@@ -52,6 +66,12 @@ void plic_enable(char mode, u64 hartid, u32 irqno)
 	bitmap_set(&irq_enabled, irqno);
 }
 
+/*
+ * 禁用指定中断在指定HART上下文中的传递
+ * @param mode: 特权模式（'S'表示监督模式，'M'表示机器模式）
+ * @param hartid: HART编号
+ * @param irqno: 中断号
+ */
 void plic_disable(char mode, u64 hartid, u32 irqno)
 {
 	assert(mode == 'S' || mode == 'M');
@@ -63,6 +83,12 @@ void plic_disable(char mode, u64 hartid, u32 irqno)
 	bitmap_clear(&irq_enabled, irqno);
 }
 
+/*
+ * 设置指定HART上下文的优先级阈值，优先级低于阈值的中断将被屏蔽
+ * @param mode: 特权模式（'S'表示监督模式，'M'表示机器模式）
+ * @param hartid: HART编号
+ * @param threshold: 阈值
+ */
 void plic_set_threshold(char mode, u64 hartid, u32 threshold)
 {
 	assert(mode == 'S' || mode == 'M');
@@ -71,6 +97,12 @@ void plic_set_threshold(char mode, u64 hartid, u32 threshold)
 	    threshold;
 }
 
+/*
+ * 获取当前最高优先级的中断号（Claim操作）
+ * @param mode: 特权模式（'S'表示监督模式，'M'表示机器模式）
+ * @param hartid: HART编号
+ * @return: 中断号，若无待处理中断则返回0
+ */
 u32 plic_claim(char mode, u64 hartid)
 {
 	assert(mode == 'S' || mode == 'M');
@@ -78,6 +110,12 @@ u32 plic_claim(char mode, u64 hartid)
 	return plic.regs->context_status[PLIC_CTX(hartid, mode)].claim_complete;
 }
 
+/*
+ * 完成中断处理（Complete操作），通知PLIC中断已处理完毕
+ * @param mode: 特权模式（'S'表示监督模式，'M'表示机器模式）
+ * @param hartid: HART编号
+ * @param irqno: 中断号
+ */
 void plic_complete(char mode, u64 hartid, u32 irqno)
 {
 	assert(mode == 'S' || mode == 'M');

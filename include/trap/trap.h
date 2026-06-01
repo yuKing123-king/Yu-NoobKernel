@@ -43,33 +43,40 @@ struct trapframe {
 	/* 280 */ u64 t6;
 };
 
+// scause 异常码（同步陷阱，scause 最高位为 0）
 enum Exception {
-	InstructionMisaligned = 0,
-	InstructionAccessFault = 1,
-	IllegalInstruction = 2,
-	Breakpoint = 3,
-	LoadMisaligned = 4,
-	LoadAccessFault = 5,
-	StoreMisaligned = 6,
-	StoreAccessFault = 7,
-	UserEnvCall = 8,
-	SupervisorEnvCall = 9,
-	MachineEnvCall = 11,
-	InstructionPageFault = 12,
-	LoadPageFault = 13,
-	StorePageFault = 15,
+	InstructionMisaligned = 0,  // 取指地址未对齐
+	InstructionAccessFault = 1, // 取指权限/地址非法（如访存超出物理内存）
+	IllegalInstruction = 2,     // 非法指令（未定义的指令编码）
+	Breakpoint = 3,             // 断点（ebreak 指令）
+	LoadMisaligned = 4,         // load 地址未对齐
+	LoadAccessFault = 5,        // load 权限/地址非法（如只读页上写入）
+	StoreMisaligned = 6,        // store/AMO 地址未对齐
+	StoreAccessFault = 7,       // store/AMO 权限/地址非法
+	UserEnvCall = 8,            // 用户态 ecall（系统调用入口）
+	SupervisorEnvCall = 9,      // S 态 ecall
+	MachineEnvCall = 11,        // M 态 ecall
+	InstructionPageFault = 12,  // 取指缺页（页表项无效/无权限）
+	LoadPageFault = 13,         // 读缺页
+	StorePageFault = 15,        // 写缺页
 };
 
+// scause 中断码（异步中断，scause 最高位为 1）
 enum Interrupt {
-	UserSoft = 0,
-	SupervisorSoft,
-	UserTimer = 4,
-	SupervisorTimer,
-	UserExternal = 8,
-	SupervisorExternal,
+	UserSoft = 0,         // U 态软件中断（其他 hart 写 mip.USIP）
+	SupervisorSoft,       // S 态软件中断（核间中断 IPI）
+	UserTimer = 4,        // U 态定时器中断
+	SupervisorTimer,      // S 态定时器中断（时钟节拍/调度）
+	UserExternal = 8,     // U 态外部中断（PLIC）
+	SupervisorExternal,   // S 态外部中断（virtio/uart 等设备）
 };
 void intr_off();
 void intr_on();
 void restore_intr(u64 old);
 
 int trap_init();
+
+/* 用户态陷阱处理 */
+void usertrap(void);
+void usertrapret(struct proc *p);
+void forkret(void);

@@ -20,6 +20,13 @@ static struct {
 	u32 count;
 } dentry_state;
 
+/*
+ * 计算dentry在哈希表中的键值
+ * @param sb: 超级块指针
+ * @param parent: 父dentry指针
+ * @param name: 文件名qstr结构
+ * @return: 哈希桶索引
+ */
 static u32 dentry_hash_key(struct super_block *sb, struct dentry *parent,
 			   struct qstr *name)
 {
@@ -28,6 +35,9 @@ static u32 dentry_hash_key(struct super_block *sb, struct dentry *parent,
 	return hash_ptr((void *)(uintptr_t)hash, dentry_state.ht.size);
 }
 
+/*
+ * 初始化dentry子系统（创建slab缓存和哈希表）
+ */
 void dentry_init(void)
 {
 	if (kmem_cache_init(&dentry_cache, "dentry", sizeof(struct dentry),
@@ -47,6 +57,13 @@ void dentry_init(void)
 	infof("dentry initialized");
 }
 
+/*
+ * 分配并初始化一个新的dentry
+ * @param parent: 父dentry指针（可为NULL）
+ * @param sb: 超级块指针
+ * @param name: 文件名
+ * @return: 成功返回dentry指针，失败返回错误指针
+ */
 struct dentry *dentry_alloc(struct dentry *parent, struct super_block *sb,
 			    const char *name)
 {
@@ -90,6 +107,10 @@ struct dentry *dentry_alloc(struct dentry *parent, struct super_block *sb,
 	return dentry;
 }
 
+/*
+ * 释放dentry占用的所有资源
+ * @param dentry: 待释放的dentry指针
+ */
 void dentry_free(struct dentry *dentry)
 {
 	if (!dentry) {
@@ -126,6 +147,13 @@ void dentry_free(struct dentry *dentry)
 	kmem_cache_free(dentry);
 }
 
+/*
+ * 在dentry哈希表中查找指定的dentry
+ * @param sb: 超级块指针
+ * @param parent: 父dentry指针
+ * @param name: 待查找的文件名
+ * @return: 成功返回dentry指针，未找到返回NULL
+ */
 struct dentry *dentry_lookup(struct super_block *sb, struct dentry *parent,
 			     struct qstr *name)
 {
@@ -151,6 +179,10 @@ struct dentry *dentry_lookup(struct super_block *sb, struct dentry *parent,
 	return NULL;
 }
 
+/*
+ * 减少dentry的引用计数，引用为0时将dentry加入LRU链表
+ * @param dentry: dentry指针
+ */
 void dentry_put(struct dentry *dentry)
 {
 	if (!dentry) {
@@ -172,6 +204,10 @@ void dentry_put(struct dentry *dentry)
 	spinlock_release(&dentry->d_lock);
 }
 
+/*
+ * 增加dentry的引用计数
+ * @param dentry: dentry指针
+ */
 void dentry_get(struct dentry *dentry)
 {
 	if (!dentry) {
@@ -183,6 +219,11 @@ void dentry_get(struct dentry *dentry)
 	spinlock_release(&dentry->d_lock);
 }
 
+/*
+ * 将dentry插入全局哈希表
+ * @param dentry: 待插入的dentry指针
+ * @return: 成功返回0，已存在返回-EEXIST，参数错误返回-EINVAL
+ */
 int dentry_insert(struct dentry *dentry)
 {
 	if (!dentry) {
@@ -223,6 +264,10 @@ int dentry_insert(struct dentry *dentry)
 	return 0;
 }
 
+/*
+ * 删除dentry（调用d_op->d_delete后释放dentry）
+ * @param dentry: 待删除的dentry指针
+ */
 void dentry_delete(struct dentry *dentry)
 {
 	if (!dentry) {
@@ -238,6 +283,11 @@ void dentry_delete(struct dentry *dentry)
 	dentry_free(dentry);
 }
 
+/*
+ * 创建并插入根dentry（名称为"/"，父dentry指向自身）
+ * @param sb: 超级块指针
+ * @return: 成功返回根dentry指针，失败返回错误指针
+ */
 struct dentry *dentry_root(struct super_block *sb)
 {
 	struct dentry *root = dentry_alloc(NULL, sb, "/");

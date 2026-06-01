@@ -9,6 +9,13 @@ extern void kthread_start(void); // 汇编入口
 extern pid_t alloc_pid();
 extern pagetable_t kpagetable;
 
+/*
+ * 创建并启动一个内核线程
+ * @param fn: 线程函数指针
+ * @param arg: 传递给线程函数的参数
+ * @param name: 线程名称
+ * @return: 成功返回线程的proc结构指针，失败返回NULL
+ */
 struct proc *kthread_create(int (*fn)(void *), void *arg, const char *name)
 {
 	struct proc *p = alloc_proc();
@@ -55,6 +62,10 @@ struct proc *kthread_create(int (*fn)(void *), void *arg, const char *name)
 	return p;
 }
 
+/*
+ * 当前内核线程退出
+ * @param ret_code: 退出码
+ */
 void kthread_exit(int ret_code)
 {
 	struct proc *p = thiscpu()->proc;

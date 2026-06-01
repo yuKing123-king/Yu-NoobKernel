@@ -3,7 +3,13 @@
 #include <misc/errno.h>
 #include <mm/kalloc.h>
 
-/* 创建新节点 */
+/*
+ * 创建基数树新节点
+ * @param prefix: 节点前缀键值
+ * @param is_leaf: 是否为叶子节点
+ * @param value: 叶子节点存储的值指针
+ * @return: 新节点指针，内存分配失败返回 NULL
+ */
 static struct rxtree_node *rxtree_node_alloc(u64 prefix, bool is_leaf,
 					     void *value) {
 	struct rxtree_node *node = kmalloc(sizeof(*node));
@@ -18,7 +24,10 @@ static struct rxtree_node *rxtree_node_alloc(u64 prefix, bool is_leaf,
 	return node;
 }
 
-/* 释放节点及其子节点 */
+/*
+ * 递归释放基数树节点及其所有子节点
+ * @param node: 待释放的节点指针（可为 NULL）
+ */
 static void rxtree_node_free(struct rxtree_node *node) {
 	if (!node)
 		return;
@@ -33,12 +42,22 @@ static void rxtree_node_free(struct rxtree_node *node) {
 	kfree(node);
 }
 
-/* 初始化基数树 */
+/*
+ * 初始化基数树
+ * @param tree: 基数树对象指针
+ */
 void rxtree_init(struct rxtree *tree) {
 	tree->rnode = NULL;
 }
 
-/* 插入键值对（递归实现） */
+/*
+ * 递归向基数树中插入键值对，必要时分裂叶子节点
+ * @param node: 当前节点指针的二级指针
+ * @param key: 键值
+ * @param value: 值指针
+ * @param depth: 当前递归深度
+ * @return: 成功返回 0，内存分配失败返回 -ENOMEM
+ */
 static int rxtree_insert_node(struct rxtree_node **node, u64 key, void *value,
 			      int depth) {
 	if (!*node) {
@@ -102,12 +121,23 @@ static int rxtree_insert_node(struct rxtree_node **node, u64 key, void *value,
 				  depth + 1);
 }
 
-/* 插入键值对（接口函数） */
+/*
+ * 向基数树中插入键值对（对外接口）
+ * @param tree: 基数树对象指针
+ * @param key: 键值
+ * @param value: 值指针
+ * @return: 成功返回 0，失败返回负值错误码
+ */
 int rxtree_insert(struct rxtree *tree, u64 key, void *value) {
 	return rxtree_insert_node(&tree->rnode, key, value, 0);
 }
 
-/* 查找键对应的值 */
+/*
+ * 在基数树中查找指定键对应的值
+ * @param tree: 基数树对象指针
+ * @param key: 要查找的键值
+ * @return: 找到返回值指针，未找到返回 NULL
+ */
 void *rxtree_lookup(struct rxtree *tree, u64 key) {
 	struct rxtree_node *node = tree->rnode;
 	int depth = 0;
@@ -126,7 +156,13 @@ void *rxtree_lookup(struct rxtree *tree, u64 key) {
 	return NULL;
 }
 
-/* 删除键值对（递归实现） */
+/*
+ * 递归从基数树中删除指定键的键值对，必要时合并节点
+ * @param node: 当前节点指针的二级指针
+ * @param key: 要删除的键值
+ * @param depth: 当前递归深度
+ * @return: 成功返回 0，键不存在返回 -EINVAL
+ */
 static int rxtree_delete_node(struct rxtree_node **node, u64 key, int depth) {
 	if (!*node)
 		return -EINVAL;
@@ -171,12 +207,20 @@ static int rxtree_delete_node(struct rxtree_node **node, u64 key, int depth) {
 	return ret;
 }
 
-/* 删除键值对（接口函数） */
+/*
+ * 从基数树中删除指定键的键值对（对外接口）
+ * @param tree: 基数树对象指针
+ * @param key: 要删除的键值
+ * @return: 成功返回 0，失败返回负值错误码
+ */
 int rxtree_delete(struct rxtree *tree, u64 key) {
 	return rxtree_delete_node(&tree->rnode, key, 0);
 }
 
-/* 释放整个基数树 */
+/*
+ * 释放整个基数树的所有节点内存
+ * @param tree: 基数树对象指针
+ */
 void rxtree_free(struct rxtree *tree) {
 	rxtree_node_free(tree->rnode);
 	tree->rnode = NULL;

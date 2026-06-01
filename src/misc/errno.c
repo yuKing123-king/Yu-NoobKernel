@@ -53,7 +53,9 @@ static const struct error_info error_table[] = {
 #define ERROR_TABLE_SIZE (sizeof(error_table) / sizeof(error_table[0]))
 
 /*
- * 根据错误号返回错误描述
+ * 根据错误号返回人类可读的错误描述字符串
+ * @param errnum: 错误号（负值会被取绝对值）
+ * @return: 错误描述字符串，未知错误号返回 "Unknown error"
  */
 const char *strerror(int errnum) {
 	unsigned int i;
@@ -70,7 +72,9 @@ const char *strerror(int errnum) {
 }
 
 /*
- * 根据错误号返回错误名称
+ * 根据错误号返回错误名称（如 "ERR_ENOMEM"）
+ * @param errnum: 错误号（负值会被取绝对值）
+ * @return: 错误名称字符串，未知错误号返回 "ERR_UNKNOWN"
  */
 const char *get_error_name(int errnum) {
 	unsigned int i;
@@ -87,7 +91,9 @@ const char *get_error_name(int errnum) {
 }
 
 /*
- * 打印错误信息
+ * 打印错误信息到控制台（含可选的错误前缀）
+ * @param prefix: 错误前缀字符串（可为 NULL）
+ * @param errnum: 错误号
  */
 void print_error(const char *prefix, int errnum) {
 	if (prefix) {

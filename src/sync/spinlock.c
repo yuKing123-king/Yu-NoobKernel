@@ -1,6 +1,10 @@
 #include <sync/spinlock.h>
 #include <trap/trap.h>
 
+/*
+ * 自旋锁加锁操作（关闭中断，忙等待直到获取锁）
+ * @param lock: 自旋锁指针
+ */
 void spinlock_acquire_bare(spinlock_t *lock)
 {
 	assert(lock != NULL);
@@ -14,8 +18,7 @@ void spinlock_acquire_bare(spinlock_t *lock)
 
 	intr_off();
 	while (1) {
-		if (__atomic_exchange_n(&lock->locked, 1, __ATOMIC_ACQUIRE) ==
-		    0) {
+		if (__atomic_exchange_n(&lock->locked, 1, __ATOMIC_ACQUIRE) == 0) {
 			break;
 		}
 		asm volatile("wfi" ::: "memory");
@@ -26,6 +29,10 @@ void spinlock_acquire_bare(spinlock_t *lock)
 #endif
 }
 
+/*
+ * 自旋锁解锁操作（释放锁并恢复中断状态）
+ * @param lock: 自旋锁指针
+ */
 void spinlock_release_bare(spinlock_t *lock)
 {
 	assert(lock != NULL);
@@ -42,6 +49,11 @@ void spinlock_release_bare(spinlock_t *lock)
 	intr_on();
 }
 
+/*
+ * 检查当前CPU是否持有指定自旋锁
+ * @param lock: 自旋锁指针
+ * @return: 持有锁返回非0值，否则返回0
+ */
 int spinlock_holding(spinlock_t *lock)
 {
 	assert(lock != NULL);

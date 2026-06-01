@@ -28,16 +28,31 @@ struct mem_block {
 
 static struct list_head buddy_free_list[BUDDY_MAX_ORDER + 1];
 static spinlock_t lock = SPINLOCK_INITIALIZER("buddy");
+/*
+ * 将内存大小转换为对应的order值（2^order * PAGE_SIZE）
+ * @param size: 内存大小（字节）
+ * @return: 对应的order值
+ */
 static inline u8 size2order(size_t size)
 {
 	return (u8)(log2_ceil(size) - PAGE_SHIFT);
 }
 
+/*
+ * 计算给定地址的buddy块的地址
+ * @param addr: 内存块起始地址
+ * @param order: 块的大小阶数
+ * @return: buddy块的起始地址
+ */
 static inline void *get_buddy_addr(void *addr, u8 order)
 {
 	return (void *)((uintptr_t)addr ^ (PAGE_SIZE << order));
 }
 
+/*
+ * 分配一个mem_block元数据结构体（优先使用kalloc，fallback到early堆）
+ * @return: 新分配的mem_block指针
+ */
 static struct mem_block *alloc_mem_block()
 {
 	if (likely(kalloc_inited)) {
@@ -46,6 +61,11 @@ static struct mem_block *alloc_mem_block()
 	return early_alloc(sizeof(struct mem_block));
 }
 
+/*
+ * 释放mem_block元数据结构体（early堆内存不做释放）
+ * @param ptr: 待释放的mem_block指针
+ * @return: 无返回值
+ */
 static void free_mem_block(struct mem_block *ptr)
 {
 	if (unlikely(is_early_mem(ptr))) {
@@ -55,6 +75,10 @@ static void free_mem_block(struct mem_block *ptr)
 	kfree(ptr);
 }
 
+/*
+ * 初始化buddy系统：初始化空闲链表，将BUDDY_SYSTEM区域划分为最大order的块
+ * @return: 成功返回0，失败返回负错误码
+ */
 int buddy_init()
 {
 	for (int i = 0; i <= BUDDY_MAX_ORDER; i++) {
@@ -79,6 +103,11 @@ int buddy_init()
 	return 0;
 };
 
+/*
+ * 合并低阶空闲块为高阶块，直到目标order级别
+ * @param order: 目标合并到的order值
+ * @return: 无返回值
+ */
 static void merge_blocks(u8 order)
 {
 	struct list_head *p = NULL, *n;
@@ -127,6 +156,11 @@ static void merge_blocks(u8 order)
 	}
 }
 
+/*
+ * 从高阶空闲块中分裂出目标order大小的块
+ * @param target_order: 目标分裂到的order值
+ * @return: 无返回值
+ */
 static void split_blocks(u8 target_order)
 {
 	u8 source_order = target_order + 1;
@@ -172,6 +206,11 @@ static void split_blocks(u8 target_order)
 	return;
 }
 
+/*
+ * 从指定的order空闲链表中分配一个内存块（不加锁，由调用者保证同步）
+ * @param order: 分配块的order值
+ * @return: 分配的内存块地址
+ */
 static void *buddy_alloc_inner(u8 order)
 {
 	void *addr = NULL;
@@ -192,6 +231,11 @@ static void *buddy_alloc_inner(u8 order)
 	return addr;
 }
 
+/*
+ * 分配指定大小的内存块（不加锁），需要时自动合并或分裂块
+ * @param size: 需要分配的内存大小（字节）
+ * @return: 分配的内存地址，失败返回NULL
+ */
 static void *buddy_alloc_nolock(size_t size)
 {
 	u8 order = size2order(size);
@@ -211,6 +255,11 @@ static void *buddy_alloc_nolock(size_t size)
 	return NULL;
 }
 
+/*
+ * 分配指定大小的内存块（对外接口，带锁保护）
+ * @param size: 需要分配的内存大小（字节），需在[PAGE_SIZE, BUDDY_BLOB_SIZE]范围内
+ * @return: 分配的内存地址，失败返回NULL
+ */
 void *buddy_alloc(size_t size)
 {
 	if (size < PAGE_SIZE || size > BUDDY_BLOB_SIZE) {
@@ -226,6 +275,11 @@ void *buddy_alloc(size_t size)
 	return addr;
 }
 
+/*
+ * 释放由buddy_alloc分配的内存块，将其归还到对应order的空闲链表
+ * @param addr: 待释放的内存块地址
+ * @return: 无返回值
+ */
 void buddy_free(void *addr)
 {
 	struct page *page = addr2page(addr);
@@ -242,6 +296,11 @@ void buddy_free(void *addr)
 	spinlock_release(&lock);
 }
 
+/*
+ * 打印指定order的空闲链表中的块地址
+ * @param order: 需要打印的order值
+ * @return: 无返回值
+ */
 void buddy_print_free_list(u8 order)
 {
 	const int colors[] = {92, 95, 96};
@@ -265,6 +324,10 @@ void buddy_print_free_list(u8 order)
 	printf("\x1b[0m\n");
 }
 
+/*
+ * buddy系统测试函数：循环测试各order的分配和释放功能
+ * @return: 无返回值
+ */
 void buddy_test(void)
 {
 	for (int order = 0; order < 12; order++) {
