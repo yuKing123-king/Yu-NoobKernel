@@ -73,6 +73,10 @@ struct virtio_mmio_regs {
 #define VIRTIO_DEVICE_TYPE_NET 1
 #define VIRTIO_DEVICE_TYPE_DISK 2
 
+/* VirtIO Net 特性位 */
+#define VIRTIO_NET_F_CSUM   BIT(0)  /* 校验和卸载 */
+#define VIRTIO_NET_F_MAC    BIT(5)  /* 设备提供 MAC 地址 */
+
 /* 状态寄存器位定义 */
 #define VIRTIO_CONFIG_S_ACKNOWLEDGE BIT(0)	  /* 设备已确认 */
 #define VIRTIO_CONFIG_S_DRIVER BIT(1)		  /* 驱动程序已加载 */
@@ -98,6 +102,16 @@ struct virtq_desc {
 };
 #define VRING_DESC_F_NEXT 1  /* 链接到另一个描述符 */
 #define VRING_DESC_F_WRITE 2 /* 设备写操作（vs 读） */
+
+/* VirtIO Net 包头 — 10 字节，无卸载时全零 */
+struct virtio_net_hdr {
+	u8 flags;
+	u8 gso_type;
+	le16 hdr_len;
+	le16 gso_size;
+	le16 csum_start;
+	le16 csum_offset;
+};
 
 /* 可用环结构体 */
 struct virtq_avail {

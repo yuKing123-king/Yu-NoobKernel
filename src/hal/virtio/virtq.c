@@ -6,8 +6,20 @@
 #include <sync/barrier.h>
 #include <hal/riscv.h>
 
+/*
+ * 将虚拟地址转换为物理地址（直接身份映射）
+ * @param va: 虚拟地址指针
+ * @return: 对应的物理地址
+ */
 static inline uintptr_t va2pa(void *va) { return (uintptr_t)va; }
 
+/*
+ * 创建并初始化一个Virtqueue虚拟队列
+ * @param regs: Virtio MMIO寄存器指针
+ * @param queue_idx: 队列索引
+ * @param num: 描述符数量
+ * @return: 成功返回virtq结构体指针，失败返回NULL
+ */
 struct virtq *virtq_create(struct virtio_mmio_regs *regs, u16 queue_idx,
 			   u16 num)
 {
@@ -71,6 +83,10 @@ struct virtq *virtq_create(struct virtio_mmio_regs *regs, u16 queue_idx,
 	return vq;
 }
 
+/*
+ * 销毁Virtqueue，释放相关内存
+ * @param vq: virtq结构体指针
+ */
 void virtq_destroy(struct virtq *vq)
 {
 	if (!vq)
@@ -80,6 +96,11 @@ void virtq_destroy(struct virtq *vq)
 	kfree(vq);
 }
 
+/*
+ * 从Virtqueue的空闲链表中分配一个描述符
+ * @param vq: virtq结构体指针
+ * @return: 描述符索引，若无空闲描述符则返回-1(U16_MAX)
+ */
 static u16 virtq_alloc_desc(struct virtq *vq)
 {
 	if (vq->num_free == 0) {
@@ -93,6 +114,11 @@ static u16 virtq_alloc_desc(struct virtq *vq)
 	return idx;
 }
 
+/*
+ * 将指定描述符释放回Virtqueue的空闲链表
+ * @param vq: virtq结构体指针
+ * @param idx: 描述符索引
+ */
 static void virtq_free_desc(struct virtq *vq, u16 idx)
 {
 	vq->descs[idx].addr = 0;
@@ -103,6 +129,16 @@ static void virtq_free_desc(struct virtq *vq, u16 idx)
 	vq->num_free++;
 }
 
+/*
+ * 向Virtqueue添加缓冲区描述符链（输入和输出缓冲区）
+ * @param vq: virtq结构体指针
+ * @param in_bufs: 输入缓冲区数组（设备写入）
+ * @param n_in: 输入缓冲区数量
+ * @param out_bufs: 输出缓冲区数组（设备读取）
+ * @param n_out: 输出缓冲区数量
+ * @param token: 与该请求关联的令牌指针
+ * @return: 成功返回描述符链头部索引，失败返回-1
+ */
 int virtq_add_buf(struct virtq *vq, struct virtq_buf *in_bufs, int n_in,
 		  struct virtq_buf *out_bufs, int n_out, void *token)
 {
@@ -157,6 +193,12 @@ int virtq_add_buf(struct virtq *vq, struct virtq_buf *in_bufs, int n_in,
 	return head;
 }
 
+/*
+ * 从Virtqueue的used ring中获取已完成的缓冲区，并释放相关描述符
+ * @param vq: virtq结构体指针
+ * @param len: 输出参数，写入数据的长度
+ * @return: 成功返回请求的令牌指针，无已完成缓冲区返回NULL
+ */
 void *virtq_get_buf(struct virtq *vq, u32 *len)
 {
 	spinlock_acquire(&vq->lock);
@@ -192,12 +234,21 @@ void *virtq_get_buf(struct virtq *vq, u32 *len)
 	return token;
 }
 
+/*
+ * 检查Virtqueue中是否有已完成的缓冲区可供获取
+ * @param vq: virtq结构体指针
+ * @return: 有已完成缓冲区返回true，否则返回false
+ */
 bool virtq_has_buf(struct virtq *vq)
 {
 	rmb();
 	return vq->used_idx != vq->used->idx;
 }
 
+/*
+ * 通知Virtio设备有新的缓冲区描述符已加入可用ring
+ * @param vq: virtq结构体指针
+ */
 void virtq_kick(struct virtq *vq)
 {
 	mb();
@@ -207,6 +258,11 @@ void virtq_kick(struct virtq *vq)
 	mmio_write32(&vq->regs->queue_notify, vq->queue_idx);
 }
 
+/*
+ * 获取Virtqueue中当前正在使用的描述符数量
+ * @param vq: virtq结构体指针
+ * @return: 使用中的描述符数量
+ */
 u16 virtq_desc_count(struct virtq *vq)
 {
 	spinlock_acquire(&vq->lock);
