@@ -8,7 +8,4 @@ compile_commands.json
 .cache
 .venv
 outdated
-kernel-rv
-kernel-la
-disk.img
 fs.img
