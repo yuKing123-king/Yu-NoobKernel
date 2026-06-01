@@ -34,7 +34,7 @@ extern void forkret(void);
 /* 测试 virtio-net：发送一个广播帧 */
 extern int virtio_net_send(const void *data, int len);
 extern int virtio_net_get_mac(u8 mac[6]);
-
+//在内核启动时测试 virtio-net TX，init 进程测试完成后调用 shutdown。
 static void virtio_net_test(void)
 {
 	u8 mac[6];
