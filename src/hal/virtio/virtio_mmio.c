@@ -6,7 +6,6 @@
 #include <config.h>
 
 #define VIRTIO_MMIO_MAGIC 0x74726976
-#define VIRTIO_MMIO_VERSION 2
 
 #define VIRTIO_REG_MAGIC_VALUE 0x000
 #define VIRTIO_REG_VERSION 0x004
@@ -17,6 +16,8 @@
 #define VIRTIO_REG_QUEUE_SEL 0x030
 #define VIRTIO_REG_QUEUE_NUM_MAX 0x034
 #define VIRTIO_REG_QUEUE_NUM 0x038
+#define VIRTIO_REG_QUEUE_ALIGN 0x03c
+#define VIRTIO_REG_QUEUE_PFN 0x040
 #define VIRTIO_REG_QUEUE_READY 0x044
 #define VIRTIO_REG_QUEUE_NOTIFY 0x050
 #define VIRTIO_REG_INT_STATUS 0x060
@@ -94,7 +95,7 @@ int virtio_mmio_probe(struct virtio_mmio_regs *regs, u32 irqno)
 		return -1;
 	}
 
-	if (version != VIRTIO_MMIO_VERSION) {
+	if (version != 1 && version != 2) {
 		warnf("virtio_mmio: unsupported version %d", version);
 		return -1;
 	}
@@ -134,8 +135,10 @@ int virtio_mmio_init(struct virtio_device *dev)
 
 	dev->device_id = virtio_read_reg(dev, VIRTIO_REG_DEVICE_ID);
 	dev->vendor_id = virtio_read_reg(dev, VIRTIO_REG_VENDOR_ID);
+	dev->version = virtio_read_reg(dev, VIRTIO_REG_VERSION);
 
-	infof("virtio_mmio_init: device initialized, id=%d", dev->device_id);
+	infof("virtio_mmio_init: device initialized, id=%d, version=%d",
+	      dev->device_id, dev->version);
 	return 0;
 }
 
@@ -211,22 +214,33 @@ int virtio_setup_vq(struct virtio_device *dev, u32 vq_idx, u16 num)
 	mb();
 
 	uintptr_t desc_pa = (uintptr_t)vq->descs;
-	uintptr_t avail_pa = (uintptr_t)vq->avail;
-	uintptr_t used_pa = (uintptr_t)vq->used;
 
-	virtio_write_reg(dev, VIRTIO_REG_QUEUE_DESC_LO,
-			 (u32)(desc_pa & 0xffffffff));
-	virtio_write_reg(dev, VIRTIO_REG_QUEUE_DESC_HI, (u32)(desc_pa >> 32));
-	virtio_write_reg(dev, VIRTIO_REG_QUEUE_AVAIL_LO,
-			 (u32)(avail_pa & 0xffffffff));
-	virtio_write_reg(dev, VIRTIO_REG_QUEUE_AVAIL_HI, (u32)(avail_pa >> 32));
-	virtio_write_reg(dev, VIRTIO_REG_QUEUE_USED_LO,
-			 (u32)(used_pa & 0xffffffff));
-	virtio_write_reg(dev, VIRTIO_REG_QUEUE_USED_HI, (u32)(used_pa >> 32));
-	mb();
+	if (dev->version == 1) {
+		virtio_write_reg(dev, VIRTIO_REG_QUEUE_ALIGN, PAGE_SIZE);
+		mb();
+		virtio_write_reg(dev, VIRTIO_REG_QUEUE_PFN, desc_pa / PAGE_SIZE);
+		mb();
+	} else {
+		uintptr_t avail_pa = (uintptr_t)vq->avail;
+		uintptr_t used_pa = (uintptr_t)vq->used;
 
-	virtio_write_reg(dev, VIRTIO_REG_QUEUE_READY, 1);
-	mb();
+		virtio_write_reg(dev, VIRTIO_REG_QUEUE_DESC_LO,
+				 (u32)(desc_pa & 0xffffffff));
+		virtio_write_reg(dev, VIRTIO_REG_QUEUE_DESC_HI,
+				 (u32)(desc_pa >> 32));
+		virtio_write_reg(dev, VIRTIO_REG_QUEUE_AVAIL_LO,
+				 (u32)(avail_pa & 0xffffffff));
+		virtio_write_reg(dev, VIRTIO_REG_QUEUE_AVAIL_HI,
+				 (u32)(avail_pa >> 32));
+		virtio_write_reg(dev, VIRTIO_REG_QUEUE_USED_LO,
+				 (u32)(used_pa & 0xffffffff));
+		virtio_write_reg(dev, VIRTIO_REG_QUEUE_USED_HI,
+				 (u32)(used_pa >> 32));
+		mb();
+
+		virtio_write_reg(dev, VIRTIO_REG_QUEUE_READY, 1);
+		mb();
+	}
 
 	dev->vqs[vq_idx] = vq;
 	dev->num_vqs++;

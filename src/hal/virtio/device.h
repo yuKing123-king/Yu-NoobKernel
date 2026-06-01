@@ -11,6 +11,7 @@ struct virtio_device {
 	u32 irqno;
 	u32 device_id;
 	u32 vendor_id;
+	u32 version;
 	u32 negotiated_features;
 	struct virtq *vqs[8];
 	u32 num_vqs;
