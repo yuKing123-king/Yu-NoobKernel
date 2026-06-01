@@ -1,5 +1,5 @@
 MODULE_PATH := syscall
-SRCS :=
+SRCS := syscall.c
 SUBMODULES :=
 
 include $(RULES_MK)

@@ -5,8 +5,15 @@
 #include <mm/kalloc.h>
 #include <sync/spinlock.h>
 
+/*
+ * 初始化文件描述符表子系统
+ */
 void fd_table_init(void) { infof("fd_table initialized"); }
 
+/*
+ * 分配并初始化一个新的文件描述符表
+ * @return: 成功返回fd_table指针，失败返回NULL
+ */
 struct fd_table *fd_table_alloc(void)
 {
 	struct fd_table *fdt = kmalloc(sizeof(struct fd_table));
@@ -31,6 +38,10 @@ struct fd_table *fd_table_alloc(void)
 	return fdt;
 }
 
+/*
+ * 释放文件描述符表，关闭所有已打开的文件
+ * @param fdt: 待释放的fd_table指针
+ */
 void fd_table_free(struct fd_table *fdt)
 {
 	if (!fdt) {
@@ -51,6 +62,11 @@ void fd_table_free(struct fd_table *fdt)
 	kfree(fdt);
 }
 
+/*
+ * 复制文件描述符表（共享底层file结构，增加引用计数）
+ * @param fdt: 源fd_table指针
+ * @return: 成功返回新的fd_table指针，失败返回NULL
+ */
 struct fd_table *fd_table_dup(struct fd_table *fdt)
 {
 	if (!fdt) {
@@ -79,6 +95,11 @@ struct fd_table *fd_table_dup(struct fd_table *fdt)
 	return new_fdt;
 }
 
+/*
+ * 从文件描述符表中分配一个空闲的fd编号（必要时扩展表大小）
+ * @param fdt: fd_table指针
+ * @return: 成功返回fd编号，失败返回负的错误码
+ */
 int fd_alloc(struct fd_table *fdt)
 {
 	if (!fdt) {
@@ -125,6 +146,11 @@ int fd_alloc(struct fd_table *fdt)
 	return fd;
 }
 
+/*
+ * 释放文件描述符表中的指定fd
+ * @param fdt: fd_table指针
+ * @param fd: 待释放的文件描述符编号
+ */
 void fd_free(struct fd_table *fdt, int fd)
 {
 	if (!fdt || fd < 0 || (u32)fd >= fdt->max_fds) {
@@ -142,6 +168,12 @@ void fd_free(struct fd_table *fdt, int fd)
 	spinlock_release(&fdt->lock);
 }
 
+/*
+ * 获取文件描述符表中指定fd对应的file结构（增加引用计数）
+ * @param fdt: fd_table指针
+ * @param fd: 文件描述符编号
+ * @return: 成功返回file结构指针，无效fd返回NULL
+ */
 struct file *fd_get(struct fd_table *fdt, int fd)
 {
 	if (!fdt || fd < 0 || (u32)fd >= fdt->max_fds) {
@@ -158,6 +190,13 @@ struct file *fd_get(struct fd_table *fdt, int fd)
 	return file;
 }
 
+/*
+ * 将file结构安装到文件描述符表中的指定位置
+ * @param fdt: fd_table指针
+ * @param fd: 目标文件描述符编号
+ * @param file: 待安装的file结构指针
+ * @return: 成功返回0，失败返回负的错误码
+ */
 int fd_install(struct fd_table *fdt, int fd, struct file *file)
 {
 	if (!fdt || !file || fd < 0 || (u32)fd >= fdt->max_fds) {
