@@ -95,14 +95,8 @@ $(KERNEL_LA):
 # 辅助磁盘镜像 (EXT4, 可选)
 $(DISK_IMG):
 	$(call log,IMG,$@)
-	@if command -v mkfs.ext4 >/dev/null 2>&1; then \
-		dd if=/dev/zero of=$@ bs=1M count=32 2>/dev/null; \
-		mkfs.ext4 -F $@ >/dev/null 2>&1; \
-	else \
-		dd if=/dev/zero of=$@ bs=1M count=32 2>/dev/null; \
-		warnf("mkfs.ext4 not found, disk.img is raw zero"); \
-	fi
-
+	dd if=/dev/zero of=$@ bs=1M count=32 2>/dev/null
+	if command -v mkfs.ext4 >/dev/null 2>&1; then mkfs.ext4 -F $@ >/dev/null 2>&1; else echo "warn: mkfs.ext4 not found, disk.img is raw zero"; fi
 $(TARGET): $(MODULE_OBJS) $(BUILD_DIR)/initcode.o
 	$(call log,LD,$@)
 	@$(LD) $^ -o $@ $(LD_FLAGS)
