@@ -9,9 +9,17 @@
 	# to a page boundary.
 	#
 .section trampsec
+#
+# trampoline: 跳板页基地址标号，用于用户态和内核态切换时的页表映射
+#
 .globl trampoline
 trampoline:
 .align 4
+#
+# uservec: 用户态陷阱向量入口
+# 从用户态进入内核态时的入口，保存用户寄存器到trapframe，
+# 切换页表到内核页表，跳转到内核陷阱处理函数
+#
 .globl uservec
 uservec:
 	#
@@ -72,6 +80,12 @@ uservec:
 	sfence.vma zero, zero
 	jr t0
 
+#
+# userret: 从内核态返回用户态入口
+# 切换页表到用户页表，恢复用户寄存器，然后sret返回用户态
+# @param a0: TRAPFRAME（用户页表中的陷阱帧地址）
+# @param a1: 用户页表地址（用于satp）
+#
 .globl userret
 userret:
 	# userret(TRAPFRAME, pagetable)

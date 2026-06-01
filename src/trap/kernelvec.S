@@ -7,6 +7,11 @@
 .globl kernelvec
 .align 4
 
+#
+# kernelvec: 内核陷阱向量入口
+# 保存所有寄存器到ktrapframe，然后调用C函数kerneltrap处理中断/异常
+# 使用gp寄存器指向当前进程的ktrapframe结构体
+#
 kernelvec:
     # 1. 读取关键 CSR（必须最先做，避免 sepc 被覆盖）
     csrr t0, sepc
@@ -57,6 +62,10 @@ kernelvec:
 
     # fall through to kernelret
 
+#
+# kernelret: 内核中断返回入口
+# 从ktrapframe恢复所有寄存器及CSR，然后执行sret返回中断前状态
+#
 .globl kernelret
 kernelret:
     # 1. 恢复通用寄存器（顺序无关，因 gp 不变）

@@ -95,8 +95,21 @@ static inline struct sbiret sbi_set_timer(u64 stime_value) {
 #define IPI_SEND_IPI	0
 
 static inline struct sbiret sbi_send_ipi(
-	unsigned long hart_mask, 
+	unsigned long hart_mask,
 	unsigned long hart_mask_base
 ) {
 	return SBI_CALL_2(IPI_EID, IPI_SEND_IPI, hart_mask, hart_mask_base);
+}
+
+// SRST (System Reset) Extension
+
+#define SRST_EID 	0x53525354
+#define SRST_RESET	0
+
+#define SRST_SHUTDOWN	0
+#define SRST_COLD_REBOOT 1
+#define SRST_WARM_REBOOT 2
+
+static inline struct sbiret sbi_reboot(void) {
+	return SBI_CALL_2(SRST_EID, SRST_RESET, SRST_COLD_REBOOT, 0);
 }

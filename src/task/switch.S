@@ -1,10 +1,8 @@
-# Context switch
 #
-#   void context_switch(struct context *old, struct context *new);
+# 保存当前寄存器到old上下文，从new上下文中恢复寄存器
+# @param a0 (old): 保存当前寄存器状态的context结构指针
+# @param a1 (new): 待恢复的context结构指针
 #
-# Save current registers in old. Load from new.
-
-
 .globl context_switch
 context_switch:
 	sd ra, 0(a0)
@@ -47,6 +45,10 @@ context_switch:
 
 	ret
 
+#
+# 从new上下文中恢复所有寄存器（不保存当前状态）
+# @param a0 (new): 待恢复的context结构指针
+#
 .globl context_switch_to
 context_switch_to:
 	sd s0, 24(a0)

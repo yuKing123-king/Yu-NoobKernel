@@ -15,6 +15,10 @@ static struct cpu cpus[CPU_NUM];
 extern void idle_loop(void);
 static atomic64_t next_pid = ATOMIC64_INIT(PID_MIN);
 
+/*
+ * 分配一个唯一的进程ID
+ * @return: 成功返回分配的PID，失败时理论上不会失败（无限重试）
+ */
 pid_t alloc_pid(void)
 {
 	int64_t current;
@@ -46,12 +50,17 @@ pid_t alloc_pid(void)
 	return pid;
 }
 
+/*
+ * 初始化指定CPU核心
+ * @param id: CPU核心ID
+ */
 void init_cpu(u64 id)
 {
 	struct cpu *c = &cpus[id];
 	c->need_resched = false;
 	c->idle.ctx.ra = (uintptr_t)idle_loop;
 	c->idle.ctx.sp = (uintptr_t)c->idle_stack + IDLE_STACK_SIZE;
+	c->idle.ctx.gp = (uintptr_t)&c->idle.ktf;
 	c->idle.ctx.sstatus = SSTATUS_SIE;
 	c->idle.state = PROC_IDLE;
 	strcpy(c->idle.comm, "idle");
@@ -63,8 +72,16 @@ void init_cpu(u64 id)
 	w_tp(id);
 }
 
+/*
+ * 获取当前CPU核心的cpu结构指针
+ * @return: 当前CPU的cpu结构指针
+ */
 inline struct cpu *thiscpu() { return &cpus[r_tp()]; }
 
+/*
+ * 分配并初始化一个新的proc结构体
+ * @return: 成功返回proc指针，失败返回NULL
+ */
 struct proc *alloc_proc()
 {
 	struct proc *p = kzalloc(sizeof(struct proc));
@@ -74,6 +91,13 @@ struct proc *alloc_proc()
 	p->state = PROC_UNUSED;
 	p->ctx.gp = (uintptr_t)&p->ktf;
 	p->ctx.sstatus = SSTATUS_SIE;
+
+	INIT_LIST_HEAD(&p->vma);
+	INIT_LIST_HEAD(&p->runq);
+	INIT_LIST_HEAD(&p->children);
+	INIT_LIST_HEAD(&p->sibling);
+
+	p->lock = (spinlock_t)SPINLOCK_INITIALIZER("proc");
 
 	p->fd_table = fd_table_alloc();
 	if (!p->fd_table) {
@@ -89,7 +113,11 @@ struct proc *alloc_proc()
 	return p;
 }
 
-// 调用前需确保进程不在调度队列中，且没有子进程
+/*
+ * 释放进程占用的所有资源
+ * 调用前需确保进程不在调度队列中，且没有子进程
+ * @param p: 要释放的进程结构指针
+ */
 void free_proc(struct proc *p)
 {
 	if (!p)

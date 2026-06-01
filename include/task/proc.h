@@ -94,6 +94,9 @@ struct proc {
 	struct list_head children;
 	struct list_head sibling;
 
+	int exit_code;
+	uintptr_t brk_end;
+
 	struct fd_table *fd_table;
 	struct dentry *pwd;
 
@@ -111,6 +114,7 @@ struct cpu {
 
 void init_cpu(u64 id);
 struct cpu *thiscpu();
+pid_t alloc_pid(void);
 
 struct proc *alloc_proc();
 void free_proc(struct proc *p);
