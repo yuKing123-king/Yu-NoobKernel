@@ -14,3 +14,15 @@
 #define TRAPFRAME (TRAMPOLINE - PAGE_SIZE)
 
 void kvminit();
+
+/* 用户态页表管理 */
+pagetable_t uvmcreate(void);
+uintptr_t uvmalloc(pagetable_t pt, uintptr_t oldsz, uintptr_t newsz);
+uintptr_t uvmdealloc(pagetable_t pt, uintptr_t oldsz, uintptr_t newsz);
+void uvmfree(pagetable_t pt, uintptr_t sz);
+int uvmcopy(pagetable_t src, pagetable_t dst, uintptr_t sz);
+
+/* 用户/内核数据拷贝 */
+int copyin(pagetable_t pt, char *dst, uintptr_t srcva, size_t len);
+int copyout(pagetable_t pt, uintptr_t dstva, char *src, size_t len);
+int copyinstr(pagetable_t pt, char *dst, uintptr_t srcva, size_t max);
