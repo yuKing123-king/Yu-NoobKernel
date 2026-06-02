@@ -31,36 +31,6 @@ extern int virtio_init(void);
 extern pagetable_t kpagetable;
 extern void forkret(void);
 
-/* 测试 virtio-net：发送一个广播帧 */
-extern int virtio_net_send(const void *data, int len);
-extern int virtio_net_get_mac(u8 mac[6]);
-//在内核启动时测试 virtio-net TX，init 进程测试完成后调用 shutdown。
-static void virtio_net_test(void)
-{
-	u8 mac[6];
-	if (virtio_net_get_mac(mac) < 0) {
-		warnf("virtio_net_test: device not found");
-		return;
-	}
-
-	infof("virtio_net_test: mac=%02x:%02x:%02x:%02x:%02x:%02x",
-	      mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-
-	/* 构造一个最小广播帧（60 字节，dst=broadcast, src=our MAC） */
-	u8 frame[60];
-	memset(frame, 0xff, 6);             /* dst = ff:ff:ff:ff:ff:ff */
-	memcpy(frame + 6, mac, 6);         /* src = our MAC */
-	frame[12] = 0x08;                   /* EtherType = IPv4 */
-	frame[13] = 0x00;
-	memset(frame + 14, 0x41, 46);      /* 填充 */
-
-	int ret = virtio_net_send(frame, sizeof(frame));
-	if (ret > 0)
-		infof("virtio_net_test: sent %d bytes (broadcast)", ret);
-	else
-		warnf("virtio_net_test: send failed, ret=%d", ret);
-}
-
 /*
  * 清除 BSS 段（将 BSS 段所有字节置零）
  * BSS 段存放未初始化的全局/静态变量，在进入 main 前必须清零
@@ -174,7 +144,6 @@ void main(u64 hartid, void *_)
 		blk_init();
 		bcache_init();
 		virtio_init();
-		virtio_net_test();
 
 		/* Initialize syscall table */
 		syscall_init();
