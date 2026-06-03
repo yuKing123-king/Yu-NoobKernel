@@ -74,27 +74,32 @@ static int virtio_blk_rw_internal(struct block_device *dev, u64 sector,
 	req->status = VIRTIO_BLK_S_IOERR;
 	req->completed = false;
 
-	struct virtq_buf in_bufs[1] = {
-	    {.addr = &req->hdr, .len = sizeof(req->hdr)}};
-
+	int n_in, n_out;
+	struct virtq_buf in_bufs[2];
 	struct virtq_buf out_bufs[2];
-	int n_out;
+
+	in_bufs[0].addr = &req->hdr;
+	in_bufs[0].len  = sizeof(req->hdr);
 
 	if (write) {
-		out_bufs[0].addr = buf;
-		out_bufs[0].len = nsectors * BLOCK_SIZE;
-		out_bufs[1].addr = &req->status;
-		out_bufs[1].len = 1;
-		n_out = 2;
+		/* Write: header + data are device-readable (in), status device-writable (out) */
+		in_bufs[1].addr = buf;
+		in_bufs[1].len  = nsectors * BLOCK_SIZE;
+		n_in = 2;
+		out_bufs[0].addr = &req->status;
+		out_bufs[0].len  = 1;
+		n_out = 1;
 	} else {
+		/* Read: header device-readable (in), data+status device-writable (out) */
+		n_in = 1;
 		out_bufs[0].addr = buf;
-		out_bufs[0].len = nsectors * BLOCK_SIZE;
+		out_bufs[0].len  = nsectors * BLOCK_SIZE;
 		out_bufs[1].addr = &req->status;
-		out_bufs[1].len = 1;
+		out_bufs[1].len  = 1;
 		n_out = 2;
 	}
 
-	int idx = virtq_add_buf(vq, in_bufs, 1, out_bufs, n_out, req);
+	int idx = virtq_add_buf(vq, in_bufs, n_in, out_bufs, n_out, req);
 	if (idx < 0) {
 		kfree(req);
 		errorf("virtio_blk_rw: failed to add buffer");

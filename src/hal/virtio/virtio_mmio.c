@@ -214,14 +214,16 @@ int virtio_setup_vq(struct virtio_device *dev, u32 vq_idx, u16 num)
 	mb();
 
 	uintptr_t desc_pa = (uintptr_t)vq->descs;
-	uintptr_t avail_pa = (uintptr_t)vq->avail;
-	uintptr_t used_pa = (uintptr_t)vq->used;
+
 	if (dev->version == 1) {
 		virtio_write_reg(dev, VIRTIO_REG_QUEUE_ALIGN, PAGE_SIZE);
 		mb();
 		virtio_write_reg(dev, VIRTIO_REG_QUEUE_PFN, desc_pa / PAGE_SIZE);
 		mb();
 	} else {
+		uintptr_t avail_pa = (uintptr_t)vq->avail;
+		uintptr_t used_pa = (uintptr_t)vq->used;
+
 		virtio_write_reg(dev, VIRTIO_REG_QUEUE_DESC_LO,
 				 (u32)(desc_pa & 0xffffffff));
 		virtio_write_reg(dev, VIRTIO_REG_QUEUE_DESC_HI,
@@ -245,7 +247,7 @@ int virtio_setup_vq(struct virtio_device *dev, u32 vq_idx, u16 num)
 
 	infof(
 	    "virtio_setup_vq: vq %d ready, num=%d, desc=%p, avail=%p, used=%p",
-	    vq_idx, num, desc_pa, avail_pa, used_pa);
+	    vq_idx, num, vq->descs, vq->avail, vq->used);
 	return 0;
 }
 
