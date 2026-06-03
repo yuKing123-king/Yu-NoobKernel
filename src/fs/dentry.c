@@ -169,6 +169,7 @@ struct dentry *dentry_lookup(struct super_block *sb, struct dentry *parent,
 		    dentry->d_parent == parent &&
 		    dentry->d_name.len == name->len &&
 		    strcmp(dentry->d_name.name, name->name) == 0) {
+			dentry->d_refcnt++;
 			spinlock_release(&dentry_state.lock);
 			return dentry;
 		}

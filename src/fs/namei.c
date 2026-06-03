@@ -196,6 +196,10 @@ int vfs_path_walk(struct nameidata *nd, const char *path)
 		}
 	}
 
+	if (!dentry) {
+		return -ENOENT;
+	}
+
 	nd->dentry = dentry;
 	nd->inode = dentry->d_inode;
 

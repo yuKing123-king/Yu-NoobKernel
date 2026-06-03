@@ -51,10 +51,10 @@ void fd_table_free(struct fd_table *fdt)
 	spinlock_acquire(&fdt->lock);
 
 	for (u32 i = 0; i < fdt->max_fds; i++) {
-		if (fdt->fds[i]) {
+		if (fdt->fds[i] && fdt->fds[i] != FD_RESERVED) {
 			file_put(fdt->fds[i]);
-			fdt->fds[i] = NULL;
 		}
+		fdt->fds[i] = NULL;
 	}
 
 	kfree(fdt->fds);
@@ -82,7 +82,7 @@ struct fd_table *fd_table_dup(struct fd_table *fdt)
 	spinlock_acquire(&new_fdt->lock);
 
 	for (u32 i = 0; i < fdt->max_fds && i < new_fdt->max_fds; i++) {
-		if (fdt->fds[i]) {
+		if (fdt->fds[i] && fdt->fds[i] != FD_RESERVED) {
 			file_get(fdt->fds[i]);
 			new_fdt->fds[i] = fdt->fds[i];
 			new_fdt->open_fds++;
@@ -97,6 +97,7 @@ struct fd_table *fd_table_dup(struct fd_table *fdt)
 
 /*
  * 从文件描述符表中分配一个空闲的fd编号（必要时扩展表大小）
+ * 使用 FD_RESERVED 标记已分配的槽位，防止连续分配返回相同 fd。
  * @param fdt: fd_table指针
  * @return: 成功返回fd编号，失败返回负的错误码
  */
@@ -110,9 +111,9 @@ int fd_alloc(struct fd_table *fdt)
 
 	int fd = -EMFILE;
 	for (u32 i = 0; i < fdt->max_fds; i++) {
-		if (!fdt->fds[i]) {
+		if (fdt->fds[i] == NULL) {
 			fd = (int)i;
-			fdt->open_fds++;
+			fdt->fds[i] = FD_RESERVED;
 			break;
 		}
 	}
@@ -138,7 +139,7 @@ int fd_alloc(struct fd_table *fdt)
 			fdt->max_fds = new_max;
 
 			fd = (int)fdt->max_fds / 2;
-			fdt->open_fds++;
+			fdt->fds[fd] = FD_RESERVED;
 		}
 	}
 
@@ -159,11 +160,12 @@ void fd_free(struct fd_table *fdt, int fd)
 
 	spinlock_acquire(&fdt->lock);
 
-	if (fdt->fds[fd]) {
+	if (fdt->fds[fd] != NULL && fdt->fds[fd] != FD_RESERVED) {
 		file_put(fdt->fds[fd]);
-		fdt->fds[fd] = NULL;
 		fdt->open_fds--;
 	}
+
+	fdt->fds[fd] = NULL;
 
 	spinlock_release(&fdt->lock);
 }
@@ -172,7 +174,7 @@ void fd_free(struct fd_table *fdt, int fd)
  * 获取文件描述符表中指定fd对应的file结构（增加引用计数）
  * @param fdt: fd_table指针
  * @param fd: 文件描述符编号
- * @return: 成功返回file结构指针，无效fd返回NULL
+ * @return: 成功返回file结构指针，无效fd或reserved返回NULL
  */
 struct file *fd_get(struct fd_table *fdt, int fd)
 {
@@ -182,8 +184,10 @@ struct file *fd_get(struct fd_table *fdt, int fd)
 
 	spinlock_acquire(&fdt->lock);
 	struct file *file = fdt->fds[fd];
-	if (file) {
+	if (file && file != FD_RESERVED) {
 		file_get(file);
+	} else {
+		file = NULL;
 	}
 	spinlock_release(&fdt->lock);
 
@@ -192,6 +196,7 @@ struct file *fd_get(struct fd_table *fdt, int fd)
 
 /*
  * 将file结构安装到文件描述符表中的指定位置
+ * 允许覆盖 FD_RESERVED 标记（由 fd_alloc 预留的槽位）
  * @param fdt: fd_table指针
  * @param fd: 目标文件描述符编号
  * @param file: 待安装的file结构指针
@@ -205,7 +210,7 @@ int fd_install(struct fd_table *fdt, int fd, struct file *file)
 
 	spinlock_acquire(&fdt->lock);
 
-	if (fdt->fds[fd]) {
+	if (fdt->fds[fd] != NULL && fdt->fds[fd] != FD_RESERVED) {
 		spinlock_release(&fdt->lock);
 		return -EBADF;
 	}

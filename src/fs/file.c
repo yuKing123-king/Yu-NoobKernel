@@ -168,6 +168,14 @@ ssize_t file_read(struct file *file, void *buf, size_t count)
 		return -EINVAL;
 	}
 
+	/* 管道和字符设备（如控制台）不需要 f_inode */
+	if (file->f_mode == S_IFIFO || file->f_mode == S_IFCHR) {
+		if (!file->f_op || !file->f_op->read)
+			return -ENOSYS;
+		loff_t pos = 0;
+		return file->f_op->read(file, buf, count, &pos);
+	}
+
 	if (!file->f_inode) {
 		return -ENOENT;
 	}
@@ -216,6 +224,14 @@ ssize_t file_write(struct file *file, const void *buf, size_t count)
 {
 	if (!file || !buf || count == 0) {
 		return -EINVAL;
+	}
+
+	/* 管道和字符设备（如控制台）不需要 f_inode */
+	if (file->f_mode == S_IFIFO || file->f_mode == S_IFCHR) {
+		if (!file->f_op || !file->f_op->write)
+			return -ENOSYS;
+		loff_t pos = 0;
+		return file->f_op->write(file, buf, count, &pos);
 	}
 
 	if (!file->f_inode) {

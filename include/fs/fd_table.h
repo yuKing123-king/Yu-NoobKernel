@@ -8,6 +8,9 @@
 #define NR_OPEN_DEFAULT 32
 #define NR_OPEN_MAX 1024
 
+/* Sentinel: marks a slot reserved by fd_alloc but not yet installed */
+#define FD_RESERVED ((struct file *)1UL)
+
 struct fd_table {
 	struct file **fds;
 	u32 max_fds;

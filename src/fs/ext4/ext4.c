@@ -47,6 +47,33 @@ static int ext4_read_at(dev_t dev, u64 offset, void *buf, size_t size)
 	return 0;
 }
 
+/* Write `size` bytes to device `dev` at byte offset `offset` from `buf`.
+   Uses bcache (BLOCK_SIZE=512 sectors). */
+static int ext4_write_at(dev_t dev, u64 offset, const void *buf, size_t size)
+{
+	const u8 *p = (const u8 *)buf;
+	while (size > 0) {
+		u64 blockno = offset / BLOCK_SIZE;
+		u64 off     = offset % BLOCK_SIZE;
+		size_t n    = BLOCK_SIZE - off;
+		if (n > size) n = size;
+
+		struct buf *b = bread(dev, blockno);
+		if (!b) {
+			warnf("ext4: bread failed at block %llu (write)", blockno);
+			return -EIO;
+		}
+		memcpy(b->data + off, p, n);
+		bwrite(b);
+		brelse(b);
+
+		p      += n;
+		offset += n;
+		size   -= n;
+	}
+	return 0;
+}
+
 /* ─────────────────────────────────────────────
  * Superblock operations
  * ───────────────────────────────────────────── */
@@ -148,6 +175,138 @@ static int ext4_read_group_desc(struct ext4_sb_info *sbi, u32 bg_idx,
 /* ─────────────────────────────────────────────
  * Inode reading
  * ───────────────────────────────────────────── */
+
+/* Write superblock back to disk (1024 bytes at offset 1024) */
+static int ext4_write_superblock(struct ext4_sb_info *sbi)
+{
+	return ext4_write_at(sbi->dev, EXT4_SUPERBLOCK_OFFSET,
+			     &sbi->sb, sizeof(sbi->sb));
+}
+
+/* Write block group descriptor back to disk */
+static int ext4_write_group_desc(struct ext4_sb_info *sbi, u32 bg_idx,
+				  const struct ext4_group_desc *bgd)
+{
+	u32 block_size = sbi->block_size;
+	u32 gdt_block;
+	if (block_size > 1024)
+		gdt_block = 1;
+	else
+		gdt_block = 2;
+
+	u64 offset = (u64)gdt_block * block_size +
+		     (u64)bg_idx * sizeof(struct ext4_group_desc);
+	return ext4_write_at(sbi->dev, offset, bgd, sizeof(*bgd));
+}
+
+/* Allocate a free inode number from the inode bitmap.
+   Returns inode number on success, 0 on failure. */
+static u32 ext4_alloc_inode_from_disk(struct super_block *sb)
+{
+	struct ext4_sb_info *sbi = ext4_get_sbi(sb);
+	u32 block_size = sbi->block_size;
+	u8 *bitmap = kzalloc(block_size);
+	if (!bitmap)
+		return 0;
+
+	for (u32 bg = 0; bg < sbi->groups_count; bg++) {
+		struct ext4_group_desc bgd;
+		if (ext4_read_group_desc(sbi, bg, &bgd) < 0)
+			continue;
+
+		if (bgd.bg_free_inodes_count_lo == 0)
+			continue;
+
+		/* Read inode bitmap block */
+		u64 bm_off = (u64)bgd.bg_inode_bitmap_lo * block_size;
+		if (ext4_read_at(sbi->dev, bm_off, bitmap, block_size) < 0)
+			continue;
+
+		/* Skip reserved inodes (0, 1) — in bitmap bits 0..1 */
+		u32 start = (bg == 0) ? 10 : 0;
+		for (u32 i = start; i < sbi->inodes_per_group; i++) {
+			if (!(bitmap[i / 8] & (1 << (i % 8)))) {
+				/* Found free inode */
+				bitmap[i / 8] |= (1 << (i % 8));
+
+				/* Write back bitmap */
+				ext4_write_at(sbi->dev, bm_off, bitmap, block_size);
+
+				/* Update group descriptor */
+				bgd.bg_free_inodes_count_lo--;
+				ext4_write_group_desc(sbi, bg, &bgd);
+
+				/* Update superblock */
+				sbi->sb.s_free_inodes_count_lo--;
+				ext4_write_superblock(sbi);
+
+				kfree(bitmap);
+				return bg * sbi->inodes_per_group + i + 1;
+			}
+		}
+	}
+
+	kfree(bitmap);
+	return 0;
+}
+
+/* Allocate a free data block from the block bitmap.
+   Returns physical block number on success, 0 on failure. */
+static u32 ext4_alloc_block(struct super_block *sb)
+{
+	struct ext4_sb_info *sbi = ext4_get_sbi(sb);
+	u32 block_size = sbi->block_size;
+	u8 *bitmap = kzalloc(block_size);
+	if (!bitmap)
+		return 0;
+
+	for (u32 bg = 0; bg < sbi->groups_count; bg++) {
+		struct ext4_group_desc bgd;
+		if (ext4_read_group_desc(sbi, bg, &bgd) < 0)
+			continue;
+
+		if (bgd.bg_free_blocks_count_lo == 0)
+			continue;
+
+		u64 bm_off = (u64)bgd.bg_block_bitmap_lo * block_size;
+		if (ext4_read_at(sbi->dev, bm_off, bitmap, block_size) < 0)
+			continue;
+
+		/* Search bitmap for free bit */
+		u32 bits_per_block = block_size * 8;
+		u32 search_count = sbi->blocks_per_group < bits_per_block ?
+				   sbi->blocks_per_group : bits_per_block;
+
+		for (u32 i = 0; i < search_count; i++) {
+			if (!(bitmap[i / 8] & (1 << (i % 8)))) {
+				bitmap[i / 8] |= (1 << (i % 8));
+
+				ext4_write_at(sbi->dev, bm_off, bitmap, block_size);
+
+				bgd.bg_free_blocks_count_lo--;
+				ext4_write_group_desc(sbi, bg, &bgd);
+
+				sbi->sb.s_free_blocks_count_lo--;
+				ext4_write_superblock(sbi);
+
+				/* Zero out the allocated block */
+				u8 *zero_block = kzalloc(block_size);
+				if (zero_block) {
+					u64 blk_off = (u64)(bg * sbi->blocks_per_group + i + sbi->sb.s_first_data_block) * block_size;
+					ext4_write_at(sbi->dev, blk_off, zero_block, block_size);
+					kfree(zero_block);
+				}
+
+				kfree(bitmap);
+				return bg * sbi->blocks_per_group + i +
+				       sbi->sb.s_first_data_block;
+			}
+		}
+	}
+
+	kfree(bitmap);
+	return 0;
+}
 
 /* Read a raw inode from disk and fill into VFS inode structure */
 static int ext4_read_inode(struct super_block *sb, struct inode *inode)
@@ -364,8 +523,14 @@ static ssize_t ext4_read_data(struct super_block *sb,
 			}
 		}
 
-		if (phys_block == ~0U)
-			return total > 0 ? total : -EIO;
+		if (phys_block == ~0U) {
+			/* Sparse hole: zero-fill and continue */
+			memset(buf + total, 0, to_copy);
+			total += to_copy;
+			pos   += to_copy;
+			len   -= to_copy;
+			continue;
+		}
 
 		/* Read the block */
 		u64 byte_offset = (u64)phys_block * block_size + block_off;
@@ -417,6 +582,7 @@ static u32 ext4_dir_lookup(struct super_block *sb,
 	u64 dir_size = (u64)dir_inode->i_size_lo |
 		       ((u64)dir_inode->i_size_high << 32);
 
+
 	u8 *buf = kzalloc(dir_size < 4096 ? 4096 : dir_size);
 	if (!buf)
 		return 0;
@@ -433,6 +599,7 @@ static u32 ext4_dir_lookup(struct super_block *sb,
 		struct ext4_dirent *de = (struct ext4_dirent *)(buf + offset);
 		if (de->inode == 0 || de->rec_len == 0)
 			break;
+
 
 		if (de->name_len == (u8)namelen &&
 		    memcmp(de->name, name, namelen) == 0) {
@@ -502,6 +669,7 @@ static ssize_t ext4_read_file(struct file *file, void *buf,
 static int ext4_readdir(struct file *file, struct dirent *dirent_buf,
 			   size_t count);
 static loff_t ext4_llseek(struct file *file, loff_t offset, int whence);
+static int ext4_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode);
 
 struct super_operations ext4_super_ops = {
 	.alloc_inode   = ext4_alloc_inode,
@@ -513,6 +681,7 @@ struct super_operations ext4_super_ops = {
 
 struct inode_operations ext4_dir_inode_ops = {
 	.lookup = ext4_lookup,
+	.mkdir  = ext4_mkdir,
 };
 
 struct file_operations ext4_file_operations = {
@@ -534,7 +703,7 @@ static struct dentry *ext4_lookup(struct inode *dir, struct dentry *dentry)
 
 	if (!dir_raw) {
 		warnf("ext4_lookup: no private inode data");
-		return NULL;
+		return PTR(-ENOENT);
 	}
 
 	const char *name = dentry->d_name.name;
@@ -542,19 +711,19 @@ static struct dentry *ext4_lookup(struct inode *dir, struct dentry *dentry)
 
 	u32 ino = ext4_dir_lookup(sb, dir_raw, name, namelen);
 	if (ino == 0)
-		return NULL;
+		return PTR(-ENOENT);
 
 	/* Get/create VFS inode */
 	struct inode *child_inode = inode_get(sb, ino);
 	if (!child_inode)
-		return NULL;
+		return PTR(-EIO);
 
 	/* Read the inode data if it's new (i_private == NULL) */
 	if (!child_inode->i_private) {
 		int ret = ext4_read_inode(sb, child_inode);
 		if (ret < 0) {
 			inode_put(child_inode);
-			return NULL;
+			return PTR(-EIO);
 		}
 	}
 
@@ -621,6 +790,217 @@ static loff_t ext4_llseek(struct file *file, loff_t offset, int whence)
 		return -EINVAL;
 	}
 	return file->f_pos;
+}
+
+/* Add a directory entry to the parent directory's data blocks.
+ * Standard ext4 approach: find the last entry, shorten its rec_len to its
+ * actual size, and place the new entry right after it. */
+static int ext4_add_dir_entry(struct inode *dir, u32 ino, const char *name,
+                              int namelen, u8 file_type)
+{
+        struct ext4_sb_info *sbi = ext4_get_sbi(dir->i_sb);
+        struct ext4_inode *raw = (struct ext4_inode *)dir->i_private;
+        u32 block_size = sbi->block_size;
+        u64 dir_size  = dir->i_size;
+
+        /* Calculate new entry's required rec_len (padded to 4 bytes) */
+        u16 new_rec_len = (u16)(sizeof(struct ext4_dirent) + namelen);
+        new_rec_len = (new_rec_len + 3) & ~3;
+        if (new_rec_len < 12)
+                new_rec_len = 12;
+
+        /* Read current directory content */
+        u8 *buf = kzalloc(block_size);
+        if (!buf)
+                return -ENOMEM;
+
+        if (dir_size > 0) {
+                ssize_t ret = ext4_read_data(dir->i_sb, raw, 0, buf, dir_size);
+                if (ret < 0) {
+                        kfree(buf);
+                        return ret;
+                }
+        }
+
+        /* Walk entries to find the last one */
+        u64 offset   = 0;
+        u64 last_off = 0;
+        struct ext4_dirent *last_de = NULL;
+
+        while (offset < dir_size) {
+                struct ext4_dirent *de = (struct ext4_dirent *)(buf + offset);
+                if (de->inode == 0 || de->rec_len == 0)
+                        break;
+                last_de  = de;
+                last_off = offset;
+                offset += de->rec_len;
+        }
+
+        /* Calculate actual size of last entry */
+        u16 last_actual;
+        if (last_de) {
+                last_actual = (u16)(sizeof(struct ext4_dirent) + last_de->name_len);
+                last_actual = (last_actual + 3) & ~3;
+                if (last_actual < 12)
+                        last_actual = 12;
+        } else {
+                last_off    = 0;
+                last_actual = 0;
+        }
+
+        /* Check if new entry fits after the last entry in current block */
+        u64 new_off = last_off + last_actual;
+        if (new_off + new_rec_len > block_size) {
+                kfree(buf);
+                return -ENOSPC;
+        }
+
+        /* Shorten last entry's rec_len to its actual size */
+        if (last_de) {
+                last_de->rec_len = last_actual;
+        }
+
+        /* Place new entry */
+        struct ext4_dirent *new_de = (struct ext4_dirent *)(buf + new_off);
+        new_de->inode     = ino;
+        new_de->name_len  = (u8)namelen;
+        new_de->file_type = file_type;
+        new_de->rec_len   = (u16)(block_size - new_off);
+        memcpy(new_de->name, name, namelen);
+
+        u64 new_size = new_off + new_de->rec_len;
+
+        /* Write back — locate the physical block containing new_off */
+        u32 logical_block = (u32)(new_off / block_size);
+        u32 phys_block;
+        if (raw->i_flags & EXT4_EXTENTS_FL) {
+                phys_block = ext4_find_extent_block(sbi, raw, logical_block);
+        } else {
+                if (logical_block < EXT4_DIRECT_BLOCKS)
+                        phys_block = raw->i_block[logical_block];
+                else
+                        phys_block = ~0U;
+        }
+
+        if (phys_block != ~0U) {
+                u64 byte_off = (u64)phys_block * block_size;
+                ext4_write_at(sbi->dev, byte_off, buf, block_size);
+        }
+
+        /* Update directory inode size */
+        dir->i_size = new_size;
+        raw->i_size_lo = (u32)(new_size & 0xFFFFFFFF);
+        raw->i_size_high = (u32)(new_size >> 32);
+        inode_dirty(dir);
+
+        kfree(buf);
+        return 0;
+}
+
+/* inode_operations: mkdir */
+static int ext4_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
+{
+	struct super_block *sb = dir->i_sb;
+	struct ext4_sb_info *sbi = ext4_get_sbi(sb);
+	u32 block_size = sbi->block_size;
+
+	/* Allocate inode */
+	u32 ino = ext4_alloc_inode_from_disk(sb);
+	if (ino == 0)
+		return -ENOSPC;
+
+	/* Allocate a data block for directory contents (. and ..) */
+	u32 phys_block = ext4_alloc_block(sb);
+	if (phys_block == 0) {
+		/* TODO: free inode back */
+		return -ENOSPC;
+	}
+
+	/* Build the raw inode on disk */
+	struct ext4_inode raw_inode;
+	memset(&raw_inode, 0, sizeof(raw_inode));
+	raw_inode.i_mode  = EXT4_S_IFDIR | (mode & 0777);
+	raw_inode.i_uid   = 0;
+	raw_inode.i_gid   = 0;
+	raw_inode.i_size_lo = block_size;
+	raw_inode.i_size_high = 0;
+	raw_inode.i_links_count = 1; /* no .. yet, will be 2 after parent update */
+	raw_inode.i_blocks_lo = (u32)(sbi->block_size / 512);
+	raw_inode.i_flags     = 0;
+	raw_inode.i_block[0]  = phys_block;
+
+	/* Write raw inode to disk */
+	u32 bg_idx     = (ino - 1) / sbi->inodes_per_group;
+	u32 bg_ino_idx = (ino - 1) % sbi->inodes_per_group;
+	struct ext4_group_desc bgd;
+	if (ext4_read_group_desc(sbi, bg_idx, &bgd) == 0) {
+		u64 inode_table_off = (u64)bgd.bg_inode_table_lo * block_size;
+		u64 inode_off = inode_table_off + (u64)bg_ino_idx * sbi->inode_size;
+		ext4_write_at(sbi->dev, inode_off, &raw_inode, sizeof(raw_inode));
+	}
+
+	/* Build directory content: "." and ".." entries */
+	u8 *dir_data = kzalloc(block_size);
+	if (!dir_data)
+		return -ENOMEM;
+
+	u8 *p = dir_data;
+
+	/* "." entry - points to self */
+	struct ext4_dirent *dot = (struct ext4_dirent *)p;
+	dot->inode     = ino;
+	dot->name_len  = 1;
+	dot->file_type = EXT4_FT_DIR;
+	dot->rec_len   = sizeof(struct ext4_dirent) + 4; /* 12 bytes, padded to 12 */
+	dot->name[0]   = '.';
+
+	/* ".." entry - points to parent */
+	struct ext4_dirent *dotdot = (struct ext4_dirent *)(p + dot->rec_len);
+	dotdot->inode     = dir->i_ino;
+	dotdot->name_len  = 2;
+	dotdot->file_type = EXT4_FT_DIR;
+	dotdot->rec_len   = block_size - dot->rec_len; /* Takes remaining space */
+	dotdot->name[0]   = '.';
+	dotdot->name[1]   = '.';
+
+	/* Write directory content to the allocated block */
+	u64 byte_off = (u64)phys_block * block_size;
+	ext4_write_at(sbi->dev, byte_off, dir_data, block_size);
+	kfree(dir_data);
+
+	/* Add entry to parent directory */
+	ext4_add_dir_entry(dir, ino, dentry->d_name.name, dentry->d_name.len,
+			   EXT4_FT_DIR);
+
+	/* Update parent inode */
+	struct ext4_inode *parent_raw = (struct ext4_inode *)dir->i_private;
+	if (parent_raw)
+		parent_raw->i_links_count++;
+	inode_dirty(dir);
+
+	/* Create VFS inode and associate with dentry */
+	struct inode *child_inode = inode_get(sb, ino);
+	if (!child_inode)
+		return -ENOMEM;
+
+	if (!child_inode->i_private) {
+		int ret = ext4_read_inode(sb, child_inode);
+		if (ret < 0) {
+			inode_put(child_inode);
+			return ret;
+		}
+	}
+
+	child_inode->i_op  = &ext4_dir_inode_ops;
+	child_inode->i_fop = &ext4_dir_operations;
+	child_inode->i_sb  = sb;
+	child_inode->i_mode = S_IFDIR | (mode & 0777);
+	child_inode->i_nlink = 2;
+
+	dentry->d_inode = child_inode;
+	dentry->d_sb    = sb;
+
+	return 0;
 }
 
 /* file_operations: readdir */
