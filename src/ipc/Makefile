@@ -1,5 +1,5 @@
 MODULE_PATH := ipc
-SRCS :=
+SRCS := pipe.c
 SUBMODULES :=
 
 include $(RULES_MK)
