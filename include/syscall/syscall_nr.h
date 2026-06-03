@@ -14,6 +14,16 @@
 #define SYS_exit        93
 #define SYS_openat      56
 #define SYS_getdents64  61
+#define SYS_lseek       62
+#define SYS_getcwd      17
+#define SYS_chdir       49
+#define SYS_fstat       80
+#define SYS_mount       40
+#define SYS_umount      39
+#define SYS_nanosleep   101
+#define SYS_sched_yield 124
+#define SYS_times       153
+#define SYS_gettimeofday 169
 
 /* 新增：进程管理 */
 #define SYS_clone       220
@@ -59,6 +69,14 @@
 /* 自定义 syscall（非 Linux 标准） */
 #define SYS_shutdown    500
 #define SYS_reboot      501
+
+/* clone flags (Linux-compatible) */
+#define CLONE_VM            0x00000100  /* share address space */
+#define CLONE_FS            0x00000200  /* share fs info */
+#define CLONE_FILES         0x00000400  /* share fd table */
+#define CLONE_SIGHAND       0x00000800  /* share signal handlers */
+#define CLONE_THREAD        0x00010000  /* same thread group */
+#define SIGCHLD             0x00000011  /* child exit signal */
 
 /* 分发表最大容量 */
 #define SYSCALL_MAX     512

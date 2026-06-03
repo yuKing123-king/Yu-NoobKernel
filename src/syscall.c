@@ -19,13 +19,8 @@
 
 #include <misc/errno.h>
 #include <misc/align.h>
-#include <hal/riscv.h>
-#include <misc/cputime.h>
-#include <hal/timer.h>
 
 extern pagetable_t kpagetable;
-
-#define AT_REMOVEDIR 0x200
 extern char trampoline[];
 
 /* ============================================================
@@ -143,6 +138,7 @@ uintptr_t sys_read(int fd, uintptr_t buf, size_t len)
 uintptr_t sys_exit(int status)
 {
 	struct proc *p = curproc();
+	infof("Process %d (%s) exited with status %d", p->pid, p->comm, status);
 	p->exit_code = status;
 	p->state = PROC_ZOMBIE;
 	if (p->parent)
@@ -300,10 +296,11 @@ uintptr_t sys_fork(void)
 	if (!child->pagetable)
 		goto fail;
 
-	/* 复制用户页表（树遍历，O(已映射页数)） */
-	if (uvmcopy_tree(parent->pagetable, child->pagetable) < 0) {
+	/* 计算需要复制的用户空间大小 (brk_end 或固定范围) */
+	uintptr_t sz = USER_TOP;
+	sz = PAGE_ALIGN_UP(sz);
+	if (uvmcopy(parent->pagetable, child->pagetable, sz) < 0)
 		goto fail_freept;
-	}
 
 	/* 释放 alloc_proc 分配的空 fd_table，用 dup 的替换 */
 	fd_table_free(child->fd_table);
@@ -327,7 +324,6 @@ uintptr_t sys_fork(void)
 	/* 映射 trampoline 和 trapframe 到子进程页表 */
 	if (mappages(child->pagetable, TRAMPOLINE, (uintptr_t)trampoline, 1,
 		     PTE_R | PTE_X) != 0)
-		goto fail_freetf;
 
 	if (mappages(child->pagetable, TRAPFRAME, (uintptr_t)child->tf, 1,
 		     PTE_R | PTE_W) != 0)
@@ -360,127 +356,7 @@ uintptr_t sys_fork(void)
 
 	child->state = PROC_RUNNABLE;
 	enqueue_proc(r_tp(), child);
-	return child->pid;
 
-fail_freetf:
-	kfree(child->tf);
-fail_freestack:
-	kfree(child->kstack);
-fail_freetable:
-	fd_table_free(child->fd_table);
-fail_freept:
-	pagetable_destroy(child->pagetable);
-fail:
-	kfree(child);
-	return -ENOMEM;
-}
-
-/*
- * sys_clone — 创建子进程（支持 CLONE_VM 共享页表 + 指定子进程栈）
- * RISC-V ABI: clone(flags, child_stack, ptid, ctid, tls)
- * 当 CLONE_VM 置位时，父子共享页表（线程风格）
- * child_stack 指定子进程的初始 sp（不为 0 时使用，否则继承父进程 sp）
- */
-uintptr_t sys_clone(uintptr_t flags, uintptr_t child_stack, uintptr_t ptid,
-		    uintptr_t ctid, uintptr_t tls)
-{
-	struct proc *parent = curproc();
-	struct proc *child = alloc_proc();
-	if (!child)
-		return -ENOMEM;
-
-	child->pid = alloc_pid();
-	child->tgid = child->pid;
-	child->parent = parent;
-
-	/*
-	 * CLONE_VM: Linux 语义应共享页表，但共享页表意味着 TRAPFRAME 也需要
-	 * 在上下文切换时重新映射（两个线程共用页表但各有自己的 trapframe）。
-	 * 当前调度器不支持动态更新 TRAPFRAME 映射，因此这里统一复制页表。
-	 * 子进程仍能通过 child_stack 获得独立的栈。
-	 */
-	child->pagetable = uvmcreate();
-	if (!child->pagetable)
-		goto fail;
-
-	if (uvmcopy_tree(parent->pagetable, child->pagetable) < 0) {
-		goto fail_freept;
-	}
-
-	/*
-	 * fd_table: CLONE_FILES 置位时共享，否则复制 (dup)
-	 * fork (flags=0) 走复制分支，clone with CLONE_FILES 走共享分支
-	 */
-	fd_table_free(child->fd_table);
-	if (flags & CLONE_FILES) {
-		child->fd_table = parent->fd_table;
-	} else {
-		child->fd_table = fd_table_dup(parent->fd_table);
-	}
-	if (!child->fd_table)
-		goto fail_freept;
-
-	/* 分配内核栈 */
-	child->kstack = kzalloc(KSTACK_SIZE);
-	if (!child->kstack)
-		goto fail_freetable;
-
-	/* 分配 trapframe 并复制 */
-	child->tf = kzalloc(PAGE_SIZE);
-	if (!child->tf)
-		goto fail_freestack;
-
-	memcpy(child->tf, parent->tf, sizeof(struct trapframe));
-
-	/* 子进程返回 0 */
-	child->tf->a0 = 0;
-
-	/*
-	 * fork 时继承父进程 sp，clone 时使用指定的 child_stack。
-	 * 仅当 child_stack 是合法用户态地址时才设为子进程栈：
-	 * 要求 >= PAGE_SIZE（过滤 fd 号等小值垃圾）且 < USER_TOP。
-	 * 防止用户态 fork 调用者未清零 a1 传入的残留值被误用。
-	 */
-	if (child_stack >= PAGE_SIZE && child_stack < USER_TOP) {
-		child->tf->sp = child_stack;
-	}
-
-	/* 映射 trampoline 和 trapframe */
-	if (mappages(child->pagetable, TRAMPOLINE, (uintptr_t)trampoline, 1,
-		     PTE_R | PTE_X) != 0)
-		goto fail_freetf;
-
-	if (mappages(child->pagetable, TRAPFRAME, (uintptr_t)child->tf, 1,
-		     PTE_R | PTE_W) != 0)
-		goto fail_freetf;
-
-	/* 复制 pwd */
-	if (parent->pwd) {
-		child->pwd = parent->pwd;
-		dentry_get(child->pwd);
-	}
-
-	/* 继承 brk */
-	child->brk_end = parent->brk_end;
-
-	/* 设置上下文：forkret → usertrapret → 用户态 */
-	child->ctx.ra = (uintptr_t)forkret;
-	child->ctx.sp = (uintptr_t)child->kstack + KSTACK_SIZE;
-	child->ctx.sstatus = 0;
-
-	/* 加入父进程 children 列表 */
-	spinlock_acquire(&parent->lock);
-	list_add_tail(&child->sibling, &parent->children);
-	spinlock_release(&parent->lock);
-
-	/* 更新 trapframe 中的内核指针 */
-	child->tf->kernel_satp = MAKE_SATP(kpagetable);
-	child->tf->kernel_sp = (uintptr_t)child->kstack + KSTACK_SIZE;
-	child->tf->kernel_trap = (uintptr_t)usertrap;
-	child->tf->kernel_hartid = r_tp();
-
-	child->state = PROC_RUNNABLE;
-	enqueue_proc(r_tp(), child);
 	return child->pid;
 
 fail_freetf:
@@ -512,7 +388,7 @@ typedef struct {
 	u16 e_shentsize;
 	u16 e_shnum;
 	u16 e_shstrndx;
-} __attribute__((packed)) elf64_ehdr_t;
+} elf64_ehdr_t;
 
 typedef struct {
 	u32 p_type;
@@ -523,7 +399,7 @@ typedef struct {
 	u64 p_filesz;
 	u64 p_memsz;
 	u64 p_align;
-} __attribute__((packed)) elf64_phdr_t;
+} elf64_phdr_t;
 
 #define PT_LOAD 1
 #define PF_X 1
@@ -562,10 +438,19 @@ uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 		return -ENOEXEC;
 	}
 
-	/* 释放旧的用户空间映射（保留 trampoline 和 trapframe）
-	 * 页表树遍历替代线性扫描，复杂度 O(已映射页数) */
-	uvm_free_user_pages(p->pagetable);
-	sfence_vma();
+	/* 释放旧的用户空间映射（保留 trampoline 和 trapframe） */
+	uintptr_t old_sz = p->brk_end ? p->brk_end : USER_TOP;
+	old_sz = PAGE_ALIGN_UP(old_sz);
+
+	for (uintptr_t a = 0; a < old_sz; a += PAGE_SIZE) {
+		if (a == TRAMPOLINE || a == TRAPFRAME)
+			continue;
+		uintptr_t pa = walkaddr(p->pagetable, a);
+		if (pa) {
+			unmappages(p->pagetable, a, 1);
+			kfree((void *)pa);
+		}
+	}
 
 	p->brk_end = 0;
 
@@ -584,13 +469,13 @@ uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 
 		uintptr_t va = PAGE_ALIGN_DOWN(phdr.p_vaddr);
 		uintptr_t end = PAGE_ALIGN_UP(phdr.p_vaddr + phdr.p_memsz);
+			/* Validate: must not overlap TRAMPOLINE or TRAPFRAME */
+			if (end > USER_TOP - PAGE_SIZE ||
+			    (end > TRAPFRAME && va < TRAPFRAME + PAGE_SIZE)) {
+				file_put(f);
+				return -EINVAL;
+			}
 
-		/* Validate: must not overlap TRAMPOLINE or TRAPFRAME */
-		if (end > USER_TOP - PAGE_SIZE ||
-		    (end > TRAPFRAME && va < TRAPFRAME + PAGE_SIZE)) {
-			file_put(f);
-			return -EINVAL;
-		}
 
 		if (end > max_va)
 			max_va = end;
@@ -601,7 +486,10 @@ uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 			if (!pa)
 				goto exec_fail;
 
-			int perm = PTE_U | PTE_R | PTE_W | PTE_X;
+			int perm = PTE_U;
+			if (phdr.p_flags & PF_R) perm |= PTE_R;
+			if (phdr.p_flags & PF_W) perm |= PTE_W;
+			if (phdr.p_flags & PF_X) perm |= PTE_X;
 
 			if (mappages(p->pagetable, a, pa, 1, perm) != 0) {
 				kfree((void *)pa);
@@ -657,7 +545,7 @@ uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 
 	/* 设置 trapframe */
 	p->tf->epc = ehdr.e_entry;
-	p->tf->sp = USER_TOP - 16;
+	p->tf->sp = USER_TOP;
 	/* 传递 argc (简化：暂不传 argv) */
 	p->tf->a0 = 0;
 
@@ -668,53 +556,54 @@ exec_fail:
 	return -ENOMEM;
 }
 
-uintptr_t sys_wait4(uintptr_t pid_arg, uintptr_t wstatus, uintptr_t options, uintptr_t rusage)
-{
-	struct proc *p = curproc();
-	(void)options;
-	(void)rusage;
 
-	while (1) {
-		int found_child = 0;
+	uintptr_t sys_wait4(uintptr_t pid_arg, uintptr_t wstatus, uintptr_t options, uintptr_t rusage)
+	{
+		struct proc *p = curproc();
+		(void)options;
+		(void)rusage;
 
-		spinlock_acquire(&p->lock);
+		while (1) {
+			int found_child = 0;
 
-		struct list_head *pos;
-		list_for_each(pos, &p->children) {
-			struct proc *child = list_entry(pos, struct proc, sibling);
-			int target = (int)pid_arg;
+			spinlock_acquire(&p->lock);
 
-			if (target == -1 || target == child->pid) {
-				if (child->state == PROC_ZOMBIE) {
-					if (wstatus != 0) {
-						int status = child->exit_code;
-						if (copyout(p->pagetable, wstatus, (char *)&status,
-							    sizeof(status)) < 0) {
-							spinlock_release(&p->lock);
-							return -EFAULT;
+			struct list_head *pos;
+			list_for_each(pos, &p->children) {
+				struct proc *child = list_entry(pos, struct proc, sibling);
+				int target = (int)pid_arg;
+
+				if (target == -1 || target == child->pid) {
+					if (child->state == PROC_ZOMBIE) {
+						if (wstatus != 0) {
+							int status = child->exit_code;
+							if (copyout(p->pagetable, wstatus, (char *)&status,
+								    sizeof(status)) < 0) {
+								spinlock_release(&p->lock);
+								return -EFAULT;
+							}
 						}
+
+						pid_t cpid = child->pid;
+						list_del(&child->sibling);
+						spinlock_release(&p->lock);
+						free_proc(child);
+
+						return cpid;
 					}
-
-					pid_t cpid = child->pid;
-					list_del(&child->sibling);
-					spinlock_release(&p->lock);
-					free_proc(child);
-
-					return cpid;
+					found_child = 1;
 				}
-				found_child = 1;
+			}
+
+			spinlock_release(&p->lock);
+
+			if (found_child) {
+				wait_queue_sleep(&p->child_wait, p);
+			} else {
+				return -ECHILD;
 			}
 		}
-
-		spinlock_release(&p->lock);
-
-		if (found_child) {
-			wait_queue_sleep(&p->child_wait, p);
-		} else {
-			return -ECHILD;
-		}
 	}
-}
 
 uintptr_t sys_getpid(void)
 {
@@ -1042,21 +931,25 @@ uintptr_t sys_mkdirat(uintptr_t dirfd, uintptr_t pathname, uintptr_t mode)
 	if (copyinstr(p->pagetable, path, pathname, sizeof(path)) < 0)
 		return -EFAULT;
 
-	return vfs_mkdir(path, (umode_t)mode);
+	/* 简化：只支持绝对路径 */
+	if (path[0] != '/')
+		return -ENOSYS;
+
+	struct dentry *parent = p->pwd;
+	if (!parent)
+		return -ENOENT;
+
+	/* 查找父目录，创建子目录 */
+	/* TODO: 通过 VFS 创建目录 */
+	return -ENOSYS;
 }
 
 uintptr_t sys_unlinkat(uintptr_t dirfd, uintptr_t pathname, uintptr_t flags)
 {
-	struct proc *p = curproc();
-	char path[256];
 	(void)dirfd;
-
-	if (copyinstr(p->pagetable, path, pathname, sizeof(path)) < 0)
-		return -EFAULT;
-
-	if (flags & AT_REMOVEDIR)
-		return vfs_rmdir(path);
-	return vfs_unlink(path);
+	(void)pathname;
+	(void)flags;
+	return -ENOSYS;
 }
 
 /* ============================================================
@@ -1112,208 +1005,6 @@ uintptr_t sys_uname(uintptr_t buf)
 }
 
 /* ============================================================
- * FS: getcwd / chdir
- * ============================================================ */
-
-uintptr_t sys_getcwd(uintptr_t buf, size_t size)
-{
-	struct proc *p = curproc();
-	struct dentry *d = p->pwd;
-	if (!d)
-		return -ENOENT;
-
-	struct dentry *root = vfs_get_root();
-	char path[256];
-	int len = 0;
-	path[255] = '\0';
-
-	/* 从当前 dentry 向上遍历到根，逆向拼接 */
-	struct dentry *stack[32];
-	int depth = 0;
-	while (d != root && depth < 32) {
-		stack[depth++] = d;
-		d = d->d_parent;
-	}
-
-	for (int i = depth - 1; i >= 0; i--) {
-		if (len < 255) path[len++] = '/';
-		struct qstr *name = &stack[i]->d_name;
-		for (u32 j = 0; j < name->len && len < 255; j++)
-			path[len++] = name->name[j];
-	}
-	if (len == 0) {
-		path[len++] = '/';
-	}
-	path[len] = '\0';
-
-	if (copyout(p->pagetable, buf, path, len + 1) < 0)
-		return -EFAULT;
-	return buf;
-}
-
-uintptr_t sys_chdir(uintptr_t pathname)
-{
-	struct proc *p = curproc();
-	char path[256];
-	if (copyinstr(p->pagetable, path, pathname, sizeof(path)) < 0)
-		return -EFAULT;
-
-	struct dentry *dentry = vfs_path_lookup(NULL, path, LOOKUP_FOLLOW);
-	if (IS_ERR(dentry) || !dentry)
-		return dentry ? PTR_ERR(dentry) : -ENOENT;
-
-	if (!dentry->d_inode || !S_ISDIR(dentry->d_inode->i_mode)) {
-		dentry_put(dentry);
-		return -ENOTDIR;
-	}
-
-	struct dentry *old = p->pwd;
-	p->pwd = dentry;
-	if (old)
-		dentry_put(old);
-	return 0;
-}
-
-/* ============================================================
- * FS: fstat
- * ============================================================ */
-
-uintptr_t sys_fstat(int fd, uintptr_t statbuf)
-{
-	struct proc *p = curproc();
-	struct file *f = fd_get(p->fd_table, fd);
-	if (!f)
-		return -EBADF;
-
-	struct inode *inode = f->f_dentry ? f->f_dentry->d_inode : NULL;
-
-	struct {
-		u64 st_dev;
-		u64 st_ino;
-		u32 st_mode;
-		u32 st_nlink;
-		u64 st_size;
-		u64 st_atime_sec;
-		u64 st_mtime_sec;
-		u64 st_ctime_sec;
-	} kst;
-
-	memset(&kst, 0, sizeof(kst));
-
-	if (inode) {
-		kst.st_dev = inode->i_sb ? inode->i_sb->s_dev : 0;
-		kst.st_ino = inode->i_ino;
-		kst.st_mode = inode->i_mode;
-		kst.st_nlink = inode->i_nlink;
-		kst.st_size = inode->i_size;
-		kst.st_atime_sec = inode->i_atime;
-		kst.st_mtime_sec = inode->i_mtime;
-		kst.st_ctime_sec = inode->i_ctime;
-	}
-
-	if (copyout(p->pagetable, statbuf, (char *)&kst, sizeof(kst)) < 0) {
-		file_put(f);
-		return -EFAULT;
-	}
-
-	file_put(f);
-	return 0;
-}
-
-/* ============================================================
- * FS: mount / umount (stub — 不支持 vfat)
- * ============================================================ */
-
-uintptr_t sys_mount(uintptr_t dev, uintptr_t dir, uintptr_t type,
-		   uintptr_t flags, uintptr_t data)
-{
-	(void)dev; (void)dir; (void)type; (void)flags; (void)data;
-	return -ENODEV;
-}
-
-uintptr_t sys_umount(uintptr_t target, uintptr_t flags)
-{
-	(void)target; (void)flags;
-	return -ENODEV;
-}
-
-/* ============================================================
- * Time: gettimeofday / nanosleep / times / sched_yield
- * ============================================================ */
-
-uintptr_t sys_gettimeofday(uintptr_t tv, uintptr_t tz)
-{
-	struct proc *p = curproc();
-	(void)tz;
-
-	u64 now = r_time();
-	u64 sec = now / TIMEBASE_FREQ;
-	u64 usec = (now % TIMEBASE_FREQ) * 1000000ULL / TIMEBASE_FREQ;
-
-	struct {
-		u64 sec;
-		u64 usec;
-	} timeval;
-	timeval.sec = sec;
-	timeval.usec = usec;
-
-	if (copyout(p->pagetable, tv, (char *)&timeval, sizeof(timeval)) < 0)
-		return -EFAULT;
-	return 0;
-}
-
-uintptr_t sys_nanosleep(uintptr_t req, uintptr_t rem)
-{
-	struct proc *p = curproc();
-
-	struct {
-		u64 tv_sec;
-		u64 tv_nsec;
-	} req_ts;
-	if (copyin(p->pagetable, (char *)&req_ts, req, sizeof(req_ts)) < 0)
-		return -EFAULT;
-
-	u64 ns = req_ts.tv_sec * 1000000000ULL + req_ts.tv_nsec;
-	u64 start = r_time();
-	u64 end = start + ns_to_cputime(ns);
-
-	while (r_time() < end) {
-		/* busy-wait: 单核 QEMU 环境下简单实现 */
-	}
-
-	if (rem)
-		memset((void *)rem, 0, sizeof(req_ts));
-
-	return 0;
-}
-
-uintptr_t sys_times(uintptr_t tbuf)
-{
-	struct proc *p = curproc();
-
-	struct {
-		u64 tms_utime;
-		u64 tms_stime;
-		u64 tms_cutime;
-		u64 tms_cstime;
-	} tms;
-	memset(&tms, 0, sizeof(tms));
-
-	if (tbuf) {
-		if (copyout(p->pagetable, tbuf, (char *)&tms, sizeof(tms)) < 0)
-			return -EFAULT;
-	}
-
-	return r_time() / TIMEBASE_FREQ;
-}
-
-uintptr_t sys_sched_yield(void)
-{
-	sched_yield();
-	return 0;
-}
-
-/* ============================================================
  * Syscall dispatcher
  * ============================================================ */
 
@@ -1351,8 +1042,9 @@ void syscall_init(void)
 	syscall_register(SYS_openat,      (syscall_fn_t)sys_openat);
 	syscall_register(SYS_getdents64,  (syscall_fn_t)sys_getdents);
 
-	/* 进程管理 — fork/clone 共用 SYS_clone (220)，由 child_stack==0 区分 */
-	syscall_register(SYS_clone,       (syscall_fn_t)sys_clone);
+	/* 进程管理 */
+	syscall_register(SYS_fork,        (syscall_fn_t)sys_fork);
+	syscall_register(SYS_clone,       (syscall_fn_t)sys_fork);
 	syscall_register(SYS_execve,      (syscall_fn_t)sys_execve);
 	syscall_register(SYS_wait4,       (syscall_fn_t)sys_wait4);
 	syscall_register(SYS_getpid,      (syscall_fn_t)sys_getpid);
@@ -1379,11 +1071,6 @@ void syscall_init(void)
 	/* 文件系统 */
 	syscall_register(SYS_mkdirat,     (syscall_fn_t)sys_mkdirat);
 	syscall_register(SYS_unlinkat,    (syscall_fn_t)sys_unlinkat);
-	syscall_register(SYS_getcwd,      (syscall_fn_t)sys_getcwd);
-	syscall_register(SYS_chdir,       (syscall_fn_t)sys_chdir);
-	syscall_register(SYS_fstat,       (syscall_fn_t)sys_fstat);
-	syscall_register(SYS_mount,       (syscall_fn_t)sys_mount);
-	syscall_register(SYS_umount,      (syscall_fn_t)sys_umount);
 
 	/* 信号 (stub) */
 	syscall_register(SYS_rt_sigaction, (syscall_fn_t)sys_rt_sigaction);
@@ -1391,10 +1078,6 @@ void syscall_init(void)
 
 	/* 杂项 */
 	syscall_register(SYS_uname,       (syscall_fn_t)sys_uname);
-	syscall_register(SYS_gettimeofday, (syscall_fn_t)sys_gettimeofday);
-	syscall_register(SYS_nanosleep,    (syscall_fn_t)sys_nanosleep);
-	syscall_register(SYS_times,        (syscall_fn_t)sys_times);
-	syscall_register(SYS_sched_yield, (syscall_fn_t)sys_sched_yield);
 
 	/* 自定义 */
 	syscall_register(SYS_shutdown,    (syscall_fn_t)sys_shutdown);
