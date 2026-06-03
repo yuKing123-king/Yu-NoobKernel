@@ -3,6 +3,7 @@
 #include <misc/list.h>
 #include <misc/stddef.h>
 #include <sync/spinlock.h>
+#include <sync/wait.h>
 #include <fs/fd_table.h>
 #include <fs/dentry.h>
 
@@ -96,6 +97,8 @@ struct proc {
 
 	int exit_code;
 	uintptr_t brk_end;
+	struct wait_queue child_wait;
+	bool vm_shared;		/* CLONE_VM: pagetable shared with parent */
 
 	struct fd_table *fd_table;
 	struct dentry *pwd;

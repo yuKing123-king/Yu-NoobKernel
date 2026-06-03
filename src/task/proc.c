@@ -3,6 +3,7 @@
 #include <hal/riscv.h>
 #include <mm/kalloc.h>
 #include <mm/pagetable.h>
+#include <mm/vm.h>
 #include <mm/vma.h>
 #include <sync/atomic.h>
 #include <misc/string.h>
@@ -99,6 +100,8 @@ struct proc *alloc_proc()
 
 	p->lock = (spinlock_t)SPINLOCK_INITIALIZER("proc");
 
+	wait_queue_init(&p->child_wait);
+
 	p->fd_table = fd_table_alloc();
 	if (!p->fd_table) {
 		kfree(p);
@@ -136,13 +139,8 @@ void free_proc(struct proc *p)
 	if (p->tf)
 		kfree(p->tf);
 
-	if (p->pagetable && p->pagetable != kpagetable) {
-		struct list_head *pos, *n;
-		list_for_each_safe(pos, n, &p->vma)
-		{
-			struct vma *vma = list_entry(pos, struct vma, list);
-			vma_remove(p, vma->start, vma->length);
-		}
+	if (p->pagetable && p->pagetable != kpagetable && !p->vm_shared) {
+		uvm_free_user_pages(p->pagetable);
 		pagetable_destroy(p->pagetable);
 	}
 

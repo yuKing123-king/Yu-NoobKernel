@@ -75,6 +75,7 @@ void sched_yield()
 		panic("null proc pointer in %s", __func__);
 
 	thiscpu()->proc = NULL;
+	thiscpu()->need_resched = false;
 	context_switch_yield(p);
 }
 
