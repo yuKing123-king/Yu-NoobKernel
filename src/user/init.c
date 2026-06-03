@@ -138,7 +138,8 @@ static long my_fork(void)
 {
 	register long a7 asm("a7") = SYS_fork;
 	register long _a0 asm("a0") = 0;
-	asm volatile("ecall" : "+r"(_a0) : "r"(a7) : "memory");
+	register long _a1 asm("a1") = 0;  /* child_stack = 0: fork 行为 */
+	asm volatile("ecall" : "+r"(_a0) : "r"(a7), "r"(_a1) : "memory");
 	return _a0;
 }
 
@@ -183,7 +184,13 @@ static int extract_group(const char *name, char *out, int maxlen)
 
 static int is_elf(const char *name)
 {
-	int fd = my_openat(-100, name, O_RDONLY);
+	char path[128];
+	path[0] = '/';
+	int len = 0;
+	while (name[len] && len < 126) len++;
+	for (int i = 0; i < len; i++) path[i+1] = name[i];
+	path[len+1] = 0;
+	int fd = my_openat(-100, path, O_RDONLY);
 	if (fd < 0) return 0;
 	char magic[4];
 	long n = my_read(fd, magic, 4);
@@ -284,20 +291,9 @@ void _start(void)
 				println();
 				my_exit(127);
 			}
-			/* 父进程：wait4 等待子进程 */
-			prints("[WAIT] waiting for pid ");
-			printn(cpid);
-			println();
-
 			int status = 0;
 			long wret = my_wait4(cpid, &status, 0, 0);
-			if (wret > 0) {
-				prints("[DONE] pid ");
-				printn(wret);
-				prints(" status=");
-				printn(status);
-				println();
-			} else {
+			if (wret < 0) {
 				prints("[WAIT] failed: ");
 				printn(wret);
 				println();
