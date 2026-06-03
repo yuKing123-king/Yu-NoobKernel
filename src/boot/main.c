@@ -8,6 +8,7 @@
 #include <hal/plic.h>
 #include <hal/blk.h>
 #include <hal/riscv.h>
+#include <hal/sbi.h>
 #include <mm/vm.h>
 #include <mm/kalloc.h>
 #include <mm/pagetable.h>
@@ -17,6 +18,9 @@
 #include <task/sched.h>
 #include <config.h>
 #include <fs/vfs.h>
+#include <fs/file.h>
+#include <fs/fd_table.h>
+#include <misc/errno.h>
 
 /* External functions for filesystem support */
 extern int ext4_init_fs(void);
@@ -47,6 +51,46 @@ extern void kalloc_test(void);
 extern char _binary_z_start[];
 extern char _binary_z_end[];
 
+/* ——— Console file operations (SBI-based) ——— */
+
+static ssize_t console_read(struct file *file, void *buf, size_t count,
+			    loff_t *pos)
+{
+	if (!buf || count == 0)
+		return -EINVAL; /* <misc/errno.h> */
+
+	char *p = (char *)buf;
+	size_t total = 0;
+
+	for (size_t i = 0; i < count; i++) {
+		int c = sbi_console_getchar(); /* <hal/sbi.h> */
+		if (c < 0)
+			break;
+		*p++ = (char)c;
+		total++;
+	}
+
+	return (ssize_t)total;
+}
+
+static ssize_t console_write(struct file *file, const void *buf, size_t count,
+			     loff_t *pos)
+{
+	if (!buf || count == 0)
+		return -EINVAL; /* <misc/errno.h> */
+
+	const char *p = (const char *)buf;
+	for (size_t i = 0; i < count; i++)
+		sbi_console_putchar(p[i]); /* <hal/sbi.h> */
+
+	return (ssize_t)count;
+}
+
+static struct file_operations console_fops = {
+	.read = console_read,
+	.write = console_write,
+};
+
 /**
  * @brief 创建初始用户态进程（init），加载嵌入的 init 二进制到用户空间
  * @param 无
@@ -58,6 +102,22 @@ static struct proc *create_init_process(void)
 	if (!p)
 		panic("create_init_process: alloc_proc failed");
 
+	/* 安装控制台文件到 stdin/stdout/stderr（fd 0/1/2）*/
+	{
+		struct file *con = file_alloc(); /* <fs/file.h> */
+		if (IS_ERR(con)) /* <misc/errno.h> */
+			panic("create_init_process: console file_alloc failed");
+		con->f_op = &console_fops;
+		con->f_mode = S_IFCHR; /* 字符设备，让 file_read/write 走 f_op 路径 */
+
+		/* fd_install 不增加引用计数，手动 file_get 保证三个槽位各持有一个引用 */
+		file_get(con); /* <fs/file.h> */
+		fd_install(p->fd_table, 0, con); /* <fs/fd_table.h> */
+		file_get(con);
+		fd_install(p->fd_table, 1, con);
+		fd_install(p->fd_table, 2, con);
+	}
+
 	p->pid = alloc_pid();
 	p->state = PROC_RUNNABLE;
 	strcpy(p->comm, "init");
@@ -68,7 +128,7 @@ static struct proc *create_init_process(void)
 
 	/* 在用户页表中映射跳板页（不带 PTE_U，用户态不可访问） */
 	if (mappages(p->pagetable, TRAMPOLINE, (uintptr_t)trampoline, 1,
-		     PTE_R | PTE_X | PTE_V) != 0)
+		     PTE_R | PTE_X) != 0)
 		panic("create_init_process: map trampoline failed");
 
 
@@ -78,7 +138,7 @@ static struct proc *create_init_process(void)
 	if (!p->tf)
 		panic("create_init_process: alloc trapframe failed");
 	if (mappages(p->pagetable, TRAPFRAME, (uintptr_t)p->tf, 1,
-		     PTE_R | PTE_W | PTE_V) != 0)
+		     PTE_R | PTE_W) != 0)
 		panic("create_init_process: map trapframe failed");
 
 	/* 分配内核栈 */
