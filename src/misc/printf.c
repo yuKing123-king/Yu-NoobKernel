@@ -128,9 +128,19 @@ typedef struct {
 	void *arg;
 } out_fct_wrap_type;
 
+/*
+ * 通过 SBI 调用输出一个字符到控制台
+ * @param character: 要输出的字符
+ */
 void _putchar(char character) { sbi_console_putchar(character); }
 
-// internal buffer output
+/*
+ * 内部输出函数：将字符写入缓冲区
+ * @param character: 要输出的字符
+ * @param buffer: 目标缓冲区指针
+ * @param idx: 当前写入位置索引
+ * @param maxlen: 缓冲区最大长度
+ */
 static inline void _out_buffer(char character, void *buffer, size_t idx,
 			       size_t maxlen)
 {
@@ -139,7 +149,14 @@ static inline void _out_buffer(char character, void *buffer, size_t idx,
 	}
 }
 
-// internal null output
+/*
+ * 内部输出函数：空操作输出（丢弃所有字符）
+ * 用于计算格式化字符串的长度而不实际输出
+ * @param character: 要输出的字符（被忽略）
+ * @param buffer: 缓冲区指针（未使用）
+ * @param idx: 当前索引（未使用）
+ * @param maxlen: 最大长度（未使用）
+ */
 static inline void _out_null(char character, void *buffer, size_t idx,
 			     size_t maxlen)
 {
@@ -149,7 +166,13 @@ static inline void _out_null(char character, void *buffer, size_t idx,
 	(void)maxlen;
 }
 
-// internal _putchar wrapper
+/*
+ * 内部输出函数：通过 _putchar 逐字符输出
+ * @param character: 要输出的字符
+ * @param buffer: 缓冲区指针（未使用）
+ * @param idx: 当前索引（未使用）
+ * @param maxlen: 最大长度（未使用）
+ */
 static inline void _out_char(char character, void *buffer, size_t idx,
 			     size_t maxlen)
 {
@@ -161,7 +184,14 @@ static inline void _out_char(char character, void *buffer, size_t idx,
 	}
 }
 
-// internal output function wrapper
+/*
+ * 内部输出函数：通过回调函数输出字符
+ * buffer 参数实际指向 out_fct_wrap_type 结构体
+ * @param character: 要输出的字符
+ * @param buffer: 指向 out_fct_wrap_type 结构体的指针
+ * @param idx: 当前索引（未使用）
+ * @param maxlen: 最大长度（未使用）
+ */
 static inline void _out_fct(char character, void *buffer, size_t idx,
 			    size_t maxlen)
 {
@@ -174,9 +204,12 @@ static inline void _out_fct(char character, void *buffer, size_t idx,
 	}
 }
 
-// internal secure strlen
-// \return The length of the string (excluding the terminating 0) limited by
-// 'maxsize'
+/*
+ * 安全获取字符串长度（带最大限制）
+ * @param str: 输入字符串
+ * @param maxsize: 最大遍历长度
+ * @return: 字符串长度（不超过 maxsize，不含终止符 \0）
+ */
 static inline unsigned int _strnlen_s(const char *str, size_t maxsize)
 {
 	const char *s;
@@ -185,11 +218,18 @@ static inline unsigned int _strnlen_s(const char *str, size_t maxsize)
 	return (unsigned int)(s - str);
 }
 
-// internal test if char is a digit (0-9)
-// \return true if char is a digit
+/*
+ * 判断字符是否为数字（0-9）
+ * @param ch: 待检测字符
+ * @return: 若为数字返回 true，否则返回 false
+ */
 static inline bool _is_digit(char ch) { return (ch >= '0') && (ch <= '9'); }
 
-// internal ASCII string to unsigned int conversion
+/*
+ * 将 ASCII 字符串转换为无符号整数
+ * @param str: 指向字符串指针的指针（调用后会推进到非数字字符处）
+ * @return: 转换得到的无符号整数值
+ */
 static unsigned int _atoi(const char **str)
 {
 	unsigned int i = 0U;
@@ -199,7 +239,18 @@ static unsigned int _atoi(const char **str)
 	return i;
 }
 
-// output the specified string in reverse, taking care of any zero-padding
+/*
+ * 逆序输出字符串，处理零填充和空格填充
+ * @param out: 输出回调函数
+ * @param buffer: 缓冲区指针
+ * @param idx: 当前写入位置
+ * @param maxlen: 缓冲区最大长度
+ * @param buf: 待输出的字符串（逆序）
+ * @param len: 字符串长度
+ * @param width: 最小宽度
+ * @param flags: 格式标志位
+ * @return: 更新后的写入位置索引
+ */
 static size_t _out_rev(out_fct_type out, char *buffer, size_t idx,
 		       size_t maxlen, const char *buf, size_t len,
 		       unsigned int width, unsigned int flags)
@@ -228,7 +279,21 @@ static size_t _out_rev(out_fct_type out, char *buffer, size_t idx,
 	return idx;
 }
 
-// internal itoa format
+/*
+ * 数值转字符串格式化输出（处理前导零、正负号、十六进制前缀等）
+ * @param out: 输出回调函数
+ * @param buffer: 缓冲区指针
+ * @param idx: 当前写入位置
+ * @param maxlen: 缓冲区最大长度
+ * @param buf: 存放数字字符的临时缓冲区
+ * @param len: 数字字符长度
+ * @param negative: 是否为负数
+ * @param base: 进制（10/16/8/2）
+ * @param prec: 精度
+ * @param width: 最小宽度
+ * @param flags: 格式标志位
+ * @return: 更新后的写入位置索引
+ */
 static size_t _ntoa_format(out_fct_type out, char *buffer, size_t idx,
 			   size_t maxlen, char *buf, size_t len, bool negative,
 			   unsigned int base, unsigned int prec,
@@ -285,7 +350,20 @@ static size_t _ntoa_format(out_fct_type out, char *buffer, size_t idx,
 	return _out_rev(out, buffer, idx, maxlen, buf, len, width, flags);
 }
 
-// internal itoa for 'long' type
+/*
+ * 将 unsigned long 类型数值转换为字符串并输出
+ * @param out: 输出回调函数
+ * @param buffer: 缓冲区指针
+ * @param idx: 当前写入位置
+ * @param maxlen: 缓冲区最大长度
+ * @param value: 待转换的无符号长整型值
+ * @param negative: 是否为负数
+ * @param base: 进制
+ * @param prec: 精度
+ * @param width: 最小宽度
+ * @param flags: 格式标志位
+ * @return: 更新后的写入位置索引
+ */
 static size_t _ntoa_long(out_fct_type out, char *buffer, size_t idx,
 			 size_t maxlen, unsigned long value, bool negative,
 			 unsigned long base, unsigned int prec,
@@ -315,7 +393,20 @@ static size_t _ntoa_long(out_fct_type out, char *buffer, size_t idx,
 			    (unsigned int)base, prec, width, flags);
 }
 
-// internal itoa for 'long long' type
+/*
+ * 将 unsigned long long 类型数值转换为字符串并输出
+ * @param out: 输出回调函数
+ * @param buffer: 缓冲区指针
+ * @param idx: 当前写入位置
+ * @param maxlen: 缓冲区最大长度
+ * @param value: 待转换的无符号长长整型值
+ * @param negative: 是否为负数
+ * @param base: 进制
+ * @param prec: 精度
+ * @param width: 最小宽度
+ * @param flags: 格式标志位
+ * @return: 更新后的写入位置索引
+ */
 #if defined(PRINTF_SUPPORT_LONG_LONG)
 static size_t _ntoa_long_long(out_fct_type out, char *buffer, size_t idx,
 			      size_t maxlen, unsigned long long value,
@@ -358,7 +449,18 @@ static size_t _etoa(out_fct_type out, char *buffer, size_t idx, size_t maxlen,
 		    unsigned int flags);
 #endif
 
-// internal ftoa for fixed decimal floating point
+/*
+ * 将 double 浮点数转换为定点十进制字符串并输出
+ * @param out: 输出回调函数
+ * @param buffer: 缓冲区指针
+ * @param idx: 当前写入位置
+ * @param maxlen: 缓冲区最大长度
+ * @param value: 待转换的双精度浮点值
+ * @param prec: 小数精度
+ * @param width: 最小宽度
+ * @param flags: 格式标志位
+ * @return: 更新后的写入位置索引
+ */
 static size_t _ftoa(out_fct_type out, char *buffer, size_t idx, size_t maxlen,
 		    double value, unsigned int prec, unsigned int width,
 		    unsigned int flags)
@@ -491,8 +593,18 @@ static size_t _ftoa(out_fct_type out, char *buffer, size_t idx, size_t maxlen,
 }
 
 #if defined(PRINTF_SUPPORT_EXPONENTIAL)
-// internal ftoa variant for exponential floating-point type, contributed by
-// Martijn Jasperse <m.jasperse@gmail.com>
+/*
+ * 将 double 浮点数转换为指数表示法（科学计数法）字符串并输出
+ * @param out: 输出回调函数
+ * @param buffer: 缓冲区指针
+ * @param idx: 当前写入位置
+ * @param maxlen: 缓冲区最大长度
+ * @param value: 待转换的双精度浮点值
+ * @param prec: 有效数字精度
+ * @param width: 最小宽度
+ * @param flags: 格式标志位
+ * @return: 更新后的写入位置索引
+ */
 static size_t _etoa(out_fct_type out, char *buffer, size_t idx, size_t maxlen,
 		    double value, unsigned int prec, unsigned int width,
 		    unsigned int flags)
@@ -619,7 +731,16 @@ static size_t _etoa(out_fct_type out, char *buffer, size_t idx, size_t maxlen,
 #endif // PRINTF_SUPPORT_EXPONENTIAL
 #endif // PRINTF_SUPPORT_FLOAT
 
-// internal vsnprintf
+/*
+ * 内部 vsnprintf 核心实现，解析格式字符串并调用输出函数
+ * 支持标志、宽度、精度、长度修饰符及多种格式说明符
+ * @param out: 输出回调函数
+ * @param buffer: 输出缓冲区
+ * @param maxlen: 缓冲区最大长度
+ * @param format: 格式字符串
+ * @param va: 可变参数列表
+ * @return: 实际写入的字符数（不含终止符 \0）
+ */
 static int _vsnprintf(out_fct_type out, char *buffer, const size_t maxlen,
 		      const char *format, va_list va)
 {
@@ -977,6 +1098,12 @@ static int _vsnprintf(out_fct_type out, char *buffer, const size_t maxlen,
 
 ///////////////////////////////////////////////////////////////////////////////
 
+/*
+ * 格式化输出到控制台（线程安全，使用自旋锁）
+ * @param format: 格式字符串
+ * @param ...: 可变参数
+ * @return: 实际输出的字符数
+ */
 int printf_(const char *format, ...)
 {
 	static spinlock_t printf_lock = SPINLOCK_INITIALIZER("printf");
@@ -990,6 +1117,13 @@ int printf_(const char *format, ...)
 	return ret;
 }
 
+/*
+ * 格式化输出到字符串缓冲区（不限制长度）
+ * @param buffer: 目标缓冲区
+ * @param format: 格式字符串
+ * @param ...: 可变参数
+ * @return: 写入的字符数（不含终止符 \0）
+ */
 int sprintf_(char *buffer, const char *format, ...)
 {
 	va_list va;
@@ -999,6 +1133,14 @@ int sprintf_(char *buffer, const char *format, ...)
 	return ret;
 }
 
+/*
+ * 格式化输出到字符串缓冲区（限制最大长度）
+ * @param buffer: 目标缓冲区
+ * @param count: 缓冲区最大容量
+ * @param format: 格式字符串
+ * @param ...: 可变参数
+ * @return: 写入的字符数（不含终止符 \0）
+ */
 int snprintf_(char *buffer, size_t count, const char *format, ...)
 {
 	va_list va;
@@ -1008,17 +1150,39 @@ int snprintf_(char *buffer, size_t count, const char *format, ...)
 	return ret;
 }
 
+/*
+ * 格式化输出到控制台（使用 va_list 参数）
+ * @param format: 格式字符串
+ * @param va: 可变参数列表
+ * @return: 实际输出的字符数
+ */
 int vprintf_(const char *format, va_list va)
 {
 	char buffer[1];
 	return _vsnprintf(_out_char, buffer, (size_t)-1, format, va);
 }
 
+/*
+ * 格式化输出到缓冲区（使用 va_list 参数，限制最大长度）
+ * @param buffer: 目标缓冲区
+ * @param count: 缓冲区最大容量
+ * @param format: 格式字符串
+ * @param va: 可变参数列表
+ * @return: 写入的字符数（不含终止符 \0）
+ */
 int vsnprintf_(char *buffer, size_t count, const char *format, va_list va)
 {
 	return _vsnprintf(_out_buffer, buffer, count, format, va);
 }
 
+/*
+ * 通过自定义回调函数进行格式化输出
+ * @param out: 输出回调函数，接收字符和用户参数
+ * @param arg: 传递给回调函数的用户参数
+ * @param format: 格式字符串
+ * @param ...: 可变参数
+ * @return: 实际输出的字符数
+ */
 int fctprintf(void (*out)(char character, void *arg), void *arg,
 	      const char *format, ...)
 {
