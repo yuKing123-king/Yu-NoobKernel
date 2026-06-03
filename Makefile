@@ -23,7 +23,7 @@ SRC_DIR := $(ROOT_DIR)/src
 BUILD_DIR := $(ROOT_DIR)/build/$(ARCH)
 INCLUDES := $(ROOT_DIR)/include/
 RULES_MK := $(ROOT_DIR)/rules.mk
-MODULES := boot misc mm hal trap task sync fs syscall
+MODULES := boot misc mm hal trap task sync fs ipc syscall
 MODULE_DIRS := $(foreach m,$(MODULES),$(BUILD_DIR)/$(m))
 MODULE_MAKEFILES := $(foreach m,$(MODULES),$(SRC_DIR)/$(m)/Makefile)
 MODULE_OBJS := $(foreach d,$(MODULE_DIRS),$(d).o)
@@ -139,12 +139,38 @@ HELLO_C_SRC := $(SRC_DIR)/user/hello.c
 HELLO_C_OBJ := $(BUILD_DIR)/hello.c.o
 HELLO_ELF  := $(BUILD_DIR)/hello.elf
 
+PIPE_C_SRC := $(SRC_DIR)/user/pipe_test.c
+PIPE_C_OBJ := $(BUILD_DIR)/pipe_test.c.o
+PIPE_ELF  := $(BUILD_DIR)/pipe_test.elf
+
+SYSCALL_C_SRC := $(SRC_DIR)/user/syscall_test.c
+SYSCALL_C_OBJ := $(BUILD_DIR)/syscall_test.c.o
+SYSCALL_ELF  := $(BUILD_DIR)/syscall_test.elf
+
 $(HELLO_C_OBJ): $(HELLO_C_SRC)
 	@mkdir -p $(@D)
 	$(call log,CC,$@)
 	@$(CC) $(C_FLAGS) -fno-builtin -c $< -o $@
 
 $(HELLO_ELF): $(HELLO_C_OBJ)
+	$(call log,LD,$@)
+	@$(LD) -T $(ROOT_DIR)/scripts/init.ld -N -nostdlib $< -o $@
+
+$(PIPE_C_OBJ): $(PIPE_C_SRC)
+	@mkdir -p $(@D)
+	$(call log,CC,$@)
+	@$(CC) $(C_FLAGS) -fno-builtin -c $< -o $@
+
+$(PIPE_ELF): $(PIPE_C_OBJ)
+	$(call log,LD,$@)
+	@$(LD) -T $(ROOT_DIR)/scripts/init.ld -N -nostdlib $< -o $@
+
+$(SYSCALL_C_OBJ): $(SYSCALL_C_SRC)
+	@mkdir -p $(@D)
+	$(call log,CC,$@)
+	@$(CC) $(C_FLAGS) -fno-builtin -c $< -o $@
+
+$(SYSCALL_ELF): $(SYSCALL_C_OBJ)
 	$(call log,LD,$@)
 	@$(LD) -T $(ROOT_DIR)/scripts/init.ld -N -nostdlib $< -o $@
 
@@ -160,15 +186,17 @@ run: $(TARGET)
 	$(call log,RUN,$(ARCH))
 	@$(QEMU_RV) $(QEMU_FLAGS)
 
-test-fs: $(HELLO_ELF) fs.img
+test-fs: $(HELLO_ELF) $(PIPE_ELF) $(SYSCALL_ELF) fs.img
 	@echo "Copying test ELF to fs.img..."
 	@sudo mkdir -p /tmp/noob_testfs
 	@sudo mount -o loop fs.img /tmp/noob_testfs 2>/dev/null && \
-		sudo cp $(HELLO_ELF) /tmp/noob_testfs/hello_test && \
-		sudo umount /tmp/noob_testfs && \
-		sudo rmdir /tmp/noob_testfs && \
-		echo "Done: hello_test added to fs.img" || \
-		echo "Failed: mount fs.img manually"
+			sudo cp $(HELLO_ELF) /tmp/noob_testfs/hello_test && \
+			sudo cp $(PIPE_ELF) /tmp/noob_testfs/pipe_test && \
+			sudo cp $(SYSCALL_ELF) /tmp/noob_testfs/syscall_test && \
+			sudo umount /tmp/noob_testfs && \
+			sudo rmdir /tmp/noob_testfs && \
+			echo "Done: hello_test, pipe_test added to fs.img" || \
+			echo "Failed: mount fs.img manually"
 
 debug:
 	$(call log,DEBUG,$(ARCH))
