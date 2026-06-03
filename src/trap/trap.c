@@ -185,6 +185,10 @@ void usertrap(void)
 	struct proc *p = thiscpu()->proc;
 
 	if ((scause & (1UL << 63)) == 0) {
+		if (scause == 2 || scause == 15 || scause == 13 || scause == 12) {
+			infof("usertrap: page fault scause=%lx sepc=%lx stval=%lx pid=%d",
+			      scause, r_sepc(), r_stval(), p->pid);
+		}
 		switch (scause) {
 		case UserEnvCall:
 			p->tf->epc += 4;
@@ -194,8 +198,8 @@ void usertrap(void)
 			break;
 		default:
 			panic("usertrap: unexpected exception scause=%lx, "
-			      "sepc=%lx (pid %d %s)",
-			      scause, r_sepc(), p->pid, p->comm);
+			      "sepc=%lx stval=%lx (pid %d %s)",
+			      scause, r_sepc(), r_stval(), p->pid, p->comm);
 		}
 	} else {
 		int irq = scause & 0x3FF;
@@ -210,10 +214,8 @@ void usertrap(void)
 			break;
 		}
 	}
-
 	if (thiscpu()->need_resched)
 		sched_yield();
-
 	usertrapret(thiscpu()->proc);
 }
 
@@ -255,21 +257,6 @@ void usertrapret(struct proc *p)
  * @param 无
  * @return 无返回值（通过 usertrapret 进入用户态，不再返回）
  */
-/* 直接通过 SBI ecall 输出单个字符（不依赖任何内核子函数） */
-static inline void raw_putchar(char c)
-{
-	register long a0 asm("a0") = c;
-	register long a7 asm("a7") = 1; /* SBI_CONSOLE_PUTCHAR */
-	asm volatile("ecall" : "+r"(a0) : "r"(a7) : "memory");
-}
-
-/* 直接输出固定字符串 */
-static void raw_print(const char *s)
-{
-	while (*s)
-		raw_putchar(*s++);
-}
-
 void forkret(void)
 {
 	usertrapret(thiscpu()->proc);
