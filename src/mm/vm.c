@@ -41,7 +41,7 @@ uintptr_t va2pa(pagetable_t pagetable, uintptr_t va)
 static inline int kmappages(pagetable_t pagetable, uintptr_t va, uintptr_t pa,
 			    size_t npages, int perm)
 {
-	return mappages(pagetable, va, pa, npages, (perm & ~PTE_U) | PTE_V);
+	return mappages(pagetable, va, pa, npages, perm & ~PTE_U);
 }
 
 /*

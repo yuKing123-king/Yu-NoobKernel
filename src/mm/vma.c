@@ -4,10 +4,18 @@
 #include <mm/vm.h>
 #include <mm/vma.h>
 
+/*
+ * 创建并初始化一个新的VMA结构体
+ * @param start: 起始虚拟地址
+ * @param length: 区域长度（字节）
+ * @param perm: 访问权限标志
+ * @param type: VMA类型
+ * @return: VMA结构体指针，参数无效时返回NULL
+ */
 struct vma *vma_create(uintptr_t start, size_t length, int perm, int type)
 {
 	if (start < VM_START || start + length >= VM_END ||
-	    type >= VMA_TYPE_START || type <= VMA_TYPE_END)
+	    type < VMA_TYPE_START || type > VMA_TYPE_END)
 		return NULL;
 	struct vma *vma = kzalloc(sizeof(struct vma));
 	if (!vma)
@@ -20,14 +28,23 @@ struct vma *vma_create(uintptr_t start, size_t length, int perm, int type)
 	return vma;
 }
 
-// 销毁一个 VMA（释放结构体内存，不解除页表映射）
+/*
+ * 销毁一个VMA：从链表移除并释放结构体内存（不解除页表映射）
+ * @param vma: 待销毁的VMA指针
+ * @return: 无返回值
+ */
 void vma_destroy(struct vma *vma)
 {
 	list_del(&vma->list);
 	kfree(vma);
 }
 
-// 查找包含 va 的 VMA（链表有序，可提前终止）
+/*
+ * 在进程的VMA链表中查找包含指定虚拟地址的VMA
+ * @param proc: 进程结构体指针
+ * @param va: 虚拟地址
+ * @return: 包含va的VMA指针，未找到返回NULL
+ */
 struct vma *vma_find(struct proc *proc, uintptr_t va)
 {
 	struct list_head *pos;
@@ -43,7 +60,12 @@ struct vma *vma_find(struct proc *proc, uintptr_t va)
 	return NULL;
 }
 
-// 插入 VMA（仅检查重叠，不合并）
+/*
+ * 向进程的VMA链表插入新的VMA（检查重叠但不合并）
+ * @param proc: 进程结构体指针
+ * @param new_vma: 待插入的VMA指针
+ * @return: 成功返回0，重叠时返回-EEXIST
+ */
 int vma_insert(struct proc *proc, struct vma *new_vma)
 {
 	struct list_head *pos;
@@ -63,7 +85,13 @@ int vma_insert(struct proc *proc, struct vma *new_vma)
 	return 0;
 }
 
-// 删除完全匹配的 VMA（不支持拆分，调用者需保证范围对齐整个 VMA）
+/*
+ * 删除与指定范围完全匹配的VMA（不支持拆分）
+ * @param proc: 进程结构体指针
+ * @param start: 起始虚拟地址
+ * @param length: 区域长度（字节）
+ * @return: 成功返回0，未找到精确匹配返回-ENOENT
+ */
 int vma_remove(struct proc *proc, uintptr_t start, size_t length)
 {
 	struct vma *vma = vma_find(proc, start);
@@ -76,14 +104,25 @@ int vma_remove(struct proc *proc, uintptr_t start, size_t length)
 	return 0;
 }
 
-// 建立映射（延迟分配：pa=0 ⇒ PTE_V=0, PTE_M=1）
+/*
+ * 建立VMA的页表映射（延迟分配：pa=0时仅标记预留，需配合page fault handler分配物理页）
+ * @param proc: 进程结构体指针
+ * @param vma: 需要建立映射的VMA指针
+ * @return: 成功返回0，失败返回负错误码
+ */
 int vma_map_pages(struct proc *proc, struct vma *vma)
 {
 	return mappages(proc->pagetable, vma->start, 0, vma->length / PAGE_SIZE,
 			vma->perm);
 }
 
-// 解除页表映射
+/*
+ * 解除指定虚拟地址范围的页表映射
+ * @param proc: 进程结构体指针
+ * @param start: 起始虚拟地址
+ * @param length: 区域长度（字节）
+ * @return: 成功返回0
+ */
 int vma_unmap_pages(struct proc *proc, uintptr_t start, size_t length)
 {
 	return unmappages(proc->pagetable, start, length / PAGE_SIZE);

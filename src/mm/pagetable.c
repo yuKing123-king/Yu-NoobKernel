@@ -49,7 +49,7 @@ uintptr_t walkaddr(pagetable_t pagetable, uintptr_t va)
 	pte = va2pte(pagetable, va, false);
 	if (pte == 0)
 		return 0;
-	if ((*pte & PTE_M) == 0)
+	if ((*pte & PTE_V) == 0)
 		return 0;
 	pa = PTE2PA(*pte);
 	return pa;
@@ -134,7 +134,7 @@ int mappages(pagetable_t pagetable, uintptr_t va, uintptr_t pa, size_t npages,
 		return -ERANGE;
 	}
 	pte_t *pte;
-	perm &= 0x3f;
+	perm &= (PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_G | PTE_A | PTE_D);
 	for (size_t i = 0; i < npages; i++) {
 		pte = va2pte(pagetable, va + i * PAGE_SIZE, true);
 		if (!pte) {
@@ -142,11 +142,11 @@ int mappages(pagetable_t pagetable, uintptr_t va, uintptr_t pa, size_t npages,
 			      va + i * PAGE_SIZE);
 			return -ENOMEM;
 		}
-		if (*pte & PTE_M) {
+		if (*pte & PTE_V) {
 			warnf("mappages: va=%p already mapped", va + i * PAGE_SIZE);
 			return -EADDRINUSE;
 		}
-		*pte = PA2PTE(pa + i * PAGE_SIZE) | perm | PTE_M;
+		*pte = PA2PTE(pa + i * PAGE_SIZE) | perm | PTE_V | PTE_A | ((perm & PTE_W) ? PTE_D : 0);
 	}
 	return 0;
 }
@@ -166,7 +166,7 @@ int unmappages(pagetable_t pagetable, uintptr_t vm, size_t npages)
 	for (uintptr_t a = start; a < end; a += PAGE_SIZE) {
 		if ((pte = va2pte(pagetable, a, false)) == NULL)
 			continue;
-		if(*pte & PTE_M){
+		if(*pte & PTE_V){
 			*pte = 0;
 		}else{
 			debugf("trying unmap not mapped page");

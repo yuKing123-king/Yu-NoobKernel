@@ -6,6 +6,8 @@
 #include <mm/pagetable.h>
 #include <mm/vm.h>
 
+#include <task/proc.h>
+
 extern pagetable_t kpagetable;
 
 /**
@@ -45,7 +47,7 @@ uintptr_t uvmalloc(pagetable_t pt, uintptr_t oldsz, uintptr_t newsz)
 		pa = (uintptr_t)kzalloc(PAGE_SIZE);
 		if (pa == 0)
 			goto err;
-		if (mappages(pt, a, pa, 1, PTE_R | PTE_W | PTE_X | PTE_U | PTE_V) != 0) {
+		if (mappages(pt, a, pa, 1, PTE_R | PTE_W | PTE_X | PTE_U) != 0) {
 			kfree((void *)pa);
 			goto err;
 		}
@@ -118,7 +120,7 @@ int uvmcopy(pagetable_t src, pagetable_t dst, uintptr_t sz)
 		if (va == TRAMPOLINE || va == TRAPFRAME)
 			continue;
 		pte = va2pte(src, va, false);
-		if (pte == NULL || (*pte & PTE_M) == 0)
+		if (pte == NULL || (*pte & PTE_V) == 0)
 			continue;
 		pa = PTE2PA(*pte);
 		mem = kzalloc(PAGE_SIZE);
@@ -126,7 +128,7 @@ int uvmcopy(pagetable_t src, pagetable_t dst, uintptr_t sz)
 			goto err;
 		memcpy(mem, (void *)pa, PAGE_SIZE);
 		if (mappages(dst, va, (uintptr_t)mem, 1,
-			     PTE_FLAGS(*pte) & ~PTE_M) != 0) {
+			     PTE_FLAGS(*pte)) != 0) {
 			kfree(mem);
 			goto err;
 		}
@@ -243,4 +245,80 @@ int copyinstr(pagetable_t pt, char *dst, uintptr_t srcva, size_t max)
 	if (got_null)
 		return dst - start - 1;
 	return -1;
+}
+
+/* ============================================================
+ * 页表树遍历：释放所有用户物理页 + 逐页复制（用于 execve/fork）
+ *
+ * 替代原来的线性扫描 [0, USER_TOP)，改为递归遍历页表树。
+ * 复杂度从 O(2GB/PAGE_SIZE) 降为 O(已映射页数 + 中间页表页数)。
+ *
+ * RISC-V Sv39 规范：叶 PTE 至少有一个 R/W/X 位，
+ * 非叶 PTE 只有 V 位（指向下一级页表页）。
+ * ============================================================ */
+
+static void uvm_free_user_pages_level(pagetable_t pt, int level, uintptr_t base)
+{
+	for (int i = 0; i < 512; i++) {
+		pte_t pte = pt[i];
+		if (!(pte & PTE_V))          /* <项目内: src/mm/pagetable.h> 跳过无效项 */
+			continue;
+		uintptr_t va = base | ((uintptr_t)i << PXSHIFT(level));
+		if (pte & (PTE_R | PTE_W | PTE_X)) {
+			/* 叶 PTE：释放物理页，跳过 trampoline/trapframe */
+			if (va != TRAMPOLINE && va != TRAPFRAME) {
+				kfree((void *)PTE2PA(pte));   /* <项目内: src/mm/kalloc.c> */
+				pt[i] = 0;                     /* 清除 PTE 避免悬垂指针 */
+			}
+		} else if (level > 0) {
+			/* 非叶 PTE：递归进入下一级 */
+			uvm_free_user_pages_level((pagetable_t)PTE2PA(pte), level - 1, va);
+		}
+	}
+}
+
+void uvm_free_user_pages(pagetable_t pt)
+{
+	if (!pt || pt == kpagetable)
+		return;
+	uvm_free_user_pages_level(pt, 2, 0);
+}
+
+static int uvmcopy_tree_level(pagetable_t src, pagetable_t dst,
+			       int level, uintptr_t base)
+{
+	for (int i = 0; i < 512; i++) {
+		pte_t pte = src[i];
+		if (!(pte & PTE_V))
+			continue;
+		uintptr_t va = base | ((uintptr_t)i << PXSHIFT(level));
+		if (pte & (PTE_R | PTE_W | PTE_X)) {
+			/* 叶 PTE：复制物理页到目标页表 */
+			if (va == TRAMPOLINE || va == TRAPFRAME)
+				continue;
+			void *mem = kzalloc(PAGE_SIZE);    /* <项目内: src/mm/kalloc.c> */
+			if (!mem)
+				return -ENOMEM;
+			memcpy(mem, (void *)PTE2PA(pte), PAGE_SIZE);  /* <string.h> */
+			pte_t *dst_pte = va2pte(dst, va, true);  /* <项目内: src/mm/pagetable.c> */
+			if (!dst_pte) {
+				kfree(mem);
+				return -ENOMEM;
+			}
+			*dst_pte = PA2PTE(mem) | PTE_FLAGS(pte);
+		} else if (level > 0) {
+			/* 非叶 PTE：递归进入下一级 */
+			if (uvmcopy_tree_level((pagetable_t)PTE2PA(pte), dst,
+					       level - 1, va) != 0)
+				return -ENOMEM;
+		}
+	}
+	return 0;
+}
+
+int uvmcopy_tree(pagetable_t src, pagetable_t dst)
+{
+	if (!src || !dst)
+		return -EINVAL;
+	return uvmcopy_tree_level(src, dst, 2, 0);
 }

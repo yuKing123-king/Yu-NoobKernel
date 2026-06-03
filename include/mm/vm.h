@@ -22,6 +22,10 @@ uintptr_t uvmdealloc(pagetable_t pt, uintptr_t oldsz, uintptr_t newsz);
 void uvmfree(pagetable_t pt, uintptr_t sz);
 int uvmcopy(pagetable_t src, pagetable_t dst, uintptr_t sz);
 
+/* 页表树遍历：O(已映射页数) 替代线性扫描 O(USER_TOP) */
+void uvm_free_user_pages(pagetable_t pt);
+int uvmcopy_tree(pagetable_t src, pagetable_t dst);
+
 /* 用户/内核数据拷贝 */
 int copyin(pagetable_t pt, char *dst, uintptr_t srcva, size_t len);
 int copyout(pagetable_t pt, uintptr_t dstva, char *src, size_t len);

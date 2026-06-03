@@ -38,7 +38,7 @@ struct vma *vma_find(struct proc *proc, uintptr_t va);
 // 删除 [start, start+len) 范围内的所有 VMA（可能拆分或删除多个）
 int vma_remove(struct proc *proc, uintptr_t start, size_t length);
 
-// 根据 VMA 建立页表映射（仅设置 PTE_M，不分配物理页）
+// 根据 VMA 建立页表映射（仅标记预留，不分配物理页）
 int vma_map_pages(struct proc *proc, struct vma *vma);
 
 // 解除页表映射（调用 unmappages），但保留 VMA（用于 swap 或 lazy free）

@@ -18,6 +18,11 @@ static struct list_head page_free_list;
 size_t single_free_pages = 0;
 extern size_t buddy_free_pages;
 
+/*
+ * 将物理地址转换为页索引
+ * @param addr: 物理地址
+ * @return: 页索引，如果地址不在有效范围内则返回-1
+ */
 static inline int addr2index(uintptr_t addr)
 {
 	return (addr >= PM_START && addr < PM_END) ?
@@ -25,12 +30,21 @@ static inline int addr2index(uintptr_t addr)
 		       -1;
 }
 
+/*
+ * 将页索引转换为物理地址
+ * @param index: 页索引
+ * @return: 物理地址，索引无效则返回NULL
+ */
 static inline uintptr_t index2addr(int index)
 {
 	return (index >= 0 && index < PAGE_NUM) ? PM_START + index * PAGE_SIZE :
 						  (uintptr_t)NULL;
 }
 
+/*
+ * 初始化所有物理页面的属性，设置SBI、内核、early堆和buddy系统的页面标志
+ * @return: 成功返回0，失败返回负错误码
+ */
 static int pm_pages_init()
 {
 	// 初始时所有页均为空闲
@@ -88,6 +102,10 @@ static int pm_pages_init()
 	return 0;
 }
 
+/*
+ * 打印物理内存布局信息，包括SBI、内核、early堆和buddy系统的地址范围
+ * @return: 无返回值
+ */
 void print_pm_layout()
 {
 	printf("\x1b[92mphysical memory layout:\n");
@@ -98,6 +116,10 @@ void print_pm_layout()
 	printf("\x1b[0m");
 }
 
+/*
+ * 收集所有空闲页面并添加到空闲页链表（当前实现为空）
+ * @return: 始终返回0
+ */
 static int collect_free_pages()
 {
 	// INIT_LIST_HEAD(&page_free_list);
@@ -117,6 +139,10 @@ static int collect_free_pages()
 	return 0;
 }
 
+/*
+ * 物理内存管理初始化入口：依次初始化页表项、early堆、buddy系统和kalloc
+ * @return: 成功返回0，失败返回负错误码
+ */
 int pm_init()
 {
 	int ret = pm_pages_init();
@@ -141,6 +167,11 @@ int pm_init()
 	return 0;
 }
 
+/*
+ * 根据虚拟地址获取对应的物理页结构体
+ * @param addr: 虚拟地址
+ * @return: 对应的page结构体指针，地址无效则返回NULL
+ */
 struct page *addr2page(void *addr)
 {
 	int index = addr2index((uintptr_t)addr);
@@ -150,6 +181,11 @@ struct page *addr2page(void *addr)
 	return &pages[index];
 }
 
+/*
+ * 根据物理页结构体获取对应的物理地址
+ * @param page: 页结构体指针
+ * @return: 物理地址，参数无效则返回NULL
+ */
 void *page2addr(struct page *page)
 {
 	if (page == NULL || page < &pages[0] || page > &pages[PAGE_NUM - 1] ||
@@ -161,6 +197,11 @@ void *page2addr(struct page *page)
 	return (void *)index2addr(index);
 }
 
+/*
+ * 分配单个物理页（当前未实现，调用会触发panic）
+ * @param flags: 页面标志位
+ * @return: 分配的页面地址
+ */
 void *page_alloc(u8 flags)
 {
 	// if (list_empty(&page_free_list)) {
@@ -184,6 +225,11 @@ void *page_alloc(u8 flags)
 	panic("calling unimplemented function");
 }
 
+/*
+ * 释放单个物理页（当前未实现，调用会触发panic）
+ * @param addr: 要释放的页面地址
+ * @return: 成功返回0，失败返回负错误码
+ */
 int page_free(void *addr)
 {
 	// if (addr == NULL) {
@@ -206,6 +252,10 @@ int page_free(void *addr)
 	panic("calling unimplemented function");
 }
 
+/*
+ * 获取当前空闲页面总数（包括buddy管理页面和单个空闲页面）
+ * @return: 空闲页面数量
+ */
 size_t get_free_pages_num()
 {
 	return buddy_free_pages + single_free_pages;

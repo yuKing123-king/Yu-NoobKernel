@@ -17,7 +17,6 @@
 #define PTE_G (1L << 5) // Global - 全局映射(TLB在切换地址空间时无需刷新该项)
 #define PTE_A (1L << 6) // Accessed - 页是否被访问过
 #define PTE_D (1L << 7) // Dirty - 页是否被修改过
-#define PTE_M (1L << 8) // Mapped - 自定义flag, 用于标识页是否被映射
 #define PTE_FLAGS(pte) ((pte) & 0x3FF)
 
 #define PXMASK 0x1FF // 9 bits
