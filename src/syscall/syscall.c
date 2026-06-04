@@ -145,6 +145,14 @@ uintptr_t sys_exit(int status)
 	struct proc *p = curproc();
 	p->exit_code = status;
 	p->state = PROC_ZOMBIE;
+
+	/* set_tid_address: 写 0 到 clear_child_tid，唤醒 futex 等待者 */
+	if (p->clear_child_tid) {
+		int zero = 0;
+		copyout(p->pagetable, (uintptr_t)p->clear_child_tid, (char *)&zero,
+			sizeof(zero));
+	}
+
 	if (p->parent)
 		wait_queue_wakeup_one(&p->parent->child_wait);
 	sched_yield();
@@ -153,6 +161,33 @@ uintptr_t sys_exit(int status)
 }
 
 uintptr_t sys_exit_group(int status) { return sys_exit(status); }
+
+uintptr_t sys_set_tid_address(uintptr_t tidptr)
+{
+	struct proc *p = curproc();
+	p->clear_child_tid = (int *)tidptr;
+	return p->pid;
+}
+
+uintptr_t sys_getrandom(uintptr_t buf, size_t len, unsigned int flags)
+{
+	struct proc *p = curproc();
+	(void)flags;
+
+	char tmp[256];
+	size_t n = len < sizeof(tmp) ? len : sizeof(tmp);
+
+	/* 简单伪随机：用 time + pid 混合 */
+	u64 seed = r_time() ^ ((u64)p->pid << 32);
+	for (size_t i = 0; i < n; i++) {
+		seed = seed * 1103515245 + 12345;
+		tmp[i] = (char)(seed >> 16);
+	}
+
+	if (copyout(p->pagetable, buf, tmp, n) < 0)
+		return -EFAULT;
+	return n;
+}
 
 uintptr_t sys_shutdown(void)
 {
@@ -181,9 +216,23 @@ uintptr_t sys_openat(uintptr_t dirfd, uintptr_t pathname, uintptr_t flags, uintp
 	if (copyinstr(p->pagetable, path, pathname, sizeof(path)) < 0)
 		return -EFAULT;
 
-	struct file *f = vfs_open(path, (u32)flags);
-	if (IS_ERR(f))
+	/* 解析 base dentry: 绝对路径用 root，否则看 dirfd */
+	struct dentry *base = NULL;
+	if (path[0] == '/') {
+		base = NULL;
+	} else if ((long)dirfd == AT_FDCWD) {
+		base = p->pwd;
+	} else {
+		struct file *dir_file = fd_get(p->fd_table, (int)dirfd);
+		if (dir_file && dir_file->f_dentry)
+			base = dir_file->f_dentry;
+		else
+			base = p->pwd;
+	}
+	struct file *f = vfs_open_cwd(path, (u32)flags, base);
+	if (IS_ERR(f)) {
 		return (uintptr_t)PTR_ERR(f);
+	}
 
 	int fd = fd_alloc(p->fd_table);
 	if (fd < 0) {
@@ -538,8 +587,8 @@ uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 	if (copyinstr(p->pagetable, path, filename, sizeof(path)) < 0)
 		return -EFAULT;
 
-	/* 打开文件 */
-	struct file *f = vfs_open(path, O_RDONLY);
+	/* 绝对路径用 root，相对路径用 CWD */
+	struct file *f = vfs_open_cwd(path, O_RDONLY, path[0] == '/' ? NULL : p->pwd);
 	if (IS_ERR(f))
 		return (uintptr_t)PTR_ERR(f);
 
@@ -790,7 +839,12 @@ uintptr_t sys_mmap(uintptr_t addr, size_t len, int prot, int flags, int fd, loff
 
 	/* 简化实现：只支持匿名映射 */
 	if (fd >= 0)
-		return -ENOSYS;
+		goto fail;
+	/* 非匿名映射需要有效 fd */
+	if (!(flags & 0x20 /* MAP_ANONYMOUS */))
+		goto fail;
+	if (len == 0)
+		goto fail;
 
 	(void)prot;
 	(void)offset;
@@ -823,6 +877,9 @@ uintptr_t sys_mmap(uintptr_t addr, size_t len, int prot, int flags, int fd, loff
 		p->brk_end = start + sz;
 
 	return start;
+
+fail:
+	return (uintptr_t)-1; /* MAP_FAILED */
 }
 
 uintptr_t sys_munmap(uintptr_t addr, size_t len)
@@ -1037,26 +1094,26 @@ uintptr_t sys_mkdirat(uintptr_t dirfd, uintptr_t pathname, uintptr_t mode)
 {
 	struct proc *p = curproc();
 	char path[256];
-	(void)dirfd;
 
 	if (copyinstr(p->pagetable, path, pathname, sizeof(path)) < 0)
 		return -EFAULT;
 
-	return vfs_mkdir(path, (umode_t)mode);
+	struct dentry *base = (path[0] == '/') ? NULL : p->pwd;
+	return vfs_mkdir_cwd(path, (umode_t)mode, base);
 }
 
 uintptr_t sys_unlinkat(uintptr_t dirfd, uintptr_t pathname, uintptr_t flags)
 {
 	struct proc *p = curproc();
 	char path[256];
-	(void)dirfd;
 
 	if (copyinstr(p->pagetable, path, pathname, sizeof(path)) < 0)
 		return -EFAULT;
 
+	struct dentry *base = (path[0] == '/') ? NULL : p->pwd;
 	if (flags & AT_REMOVEDIR)
 		return vfs_rmdir(path);
-	return vfs_unlink(path);
+	return vfs_unlink_cwd(path, base);
 }
 
 /* ============================================================
@@ -1220,6 +1277,59 @@ uintptr_t sys_fstat(int fd, uintptr_t statbuf)
 	return 0;
 }
 
+uintptr_t sys_fstatat(uintptr_t dirfd, uintptr_t pathname, uintptr_t statbuf,
+		     uintptr_t flags)
+{
+	struct proc *p = curproc();
+	char path[256];
+
+	if (copyinstr(p->pagetable, path, pathname, sizeof(path)) < 0)
+		return -EFAULT;
+
+	(void)dirfd;
+	(void)flags;
+
+	/* 通过路径查找 inode */
+	struct dentry *base = p->pwd ? p->pwd : vfs_get_root();
+	struct dentry *d = vfs_path_lookup(base, path, 0);
+	if (!d)
+		return -ENOENT;
+
+	struct inode *inode = d->d_inode;
+	if (!inode) {
+		dentry_put(d);
+		return -ENOENT;
+	}
+
+	struct {
+		u64 st_dev;
+		u64 st_ino;
+		u32 st_mode;
+		u32 st_nlink;
+		u64 st_size;
+		u64 st_atime_sec;
+		u64 st_mtime_sec;
+		u64 st_ctime_sec;
+	} kst;
+
+	memset(&kst, 0, sizeof(kst));
+	kst.st_dev = inode->i_sb ? inode->i_sb->s_dev : 0;
+	kst.st_ino = inode->i_ino;
+	kst.st_mode = inode->i_mode;
+	kst.st_nlink = inode->i_nlink;
+	kst.st_size = inode->i_size;
+	kst.st_atime_sec = inode->i_atime;
+	kst.st_mtime_sec = inode->i_mtime;
+	kst.st_ctime_sec = inode->i_ctime;
+
+	dentry_put(d);
+
+	if (copyout(p->pagetable, statbuf, (char *)&kst, sizeof(kst)) < 0)
+		return -EFAULT;
+
+	return 0;
+}
+
 /* ============================================================
  * FS: mount / umount (stub — 不支持 vfat)
  * ============================================================ */
@@ -1359,6 +1469,7 @@ void syscall_init(void)
 	syscall_register(SYS_getppid,     (syscall_fn_t)sys_getppid);
 	syscall_register(SYS_exit,        (syscall_fn_t)sys_exit);
 	syscall_register(SYS_exit_group,  (syscall_fn_t)sys_exit_group);
+	syscall_register(SYS_set_tid_address, (syscall_fn_t)sys_set_tid_address);
 
 	/* 内存 */
 	syscall_register(SYS_brk,         (syscall_fn_t)sys_brk);
@@ -1382,6 +1493,7 @@ void syscall_init(void)
 	syscall_register(SYS_getcwd,      (syscall_fn_t)sys_getcwd);
 	syscall_register(SYS_chdir,       (syscall_fn_t)sys_chdir);
 	syscall_register(SYS_fstat,       (syscall_fn_t)sys_fstat);
+	syscall_register(SYS_fstatat,     (syscall_fn_t)sys_fstatat);
 	syscall_register(SYS_mount,       (syscall_fn_t)sys_mount);
 	syscall_register(SYS_umount,      (syscall_fn_t)sys_umount);
 
@@ -1395,6 +1507,7 @@ void syscall_init(void)
 	syscall_register(SYS_nanosleep,    (syscall_fn_t)sys_nanosleep);
 	syscall_register(SYS_times,        (syscall_fn_t)sys_times);
 	syscall_register(SYS_sched_yield, (syscall_fn_t)sys_sched_yield);
+	syscall_register(SYS_getrandom, (syscall_fn_t)sys_getrandom);
 
 	/* 自定义 */
 	syscall_register(SYS_shutdown,    (syscall_fn_t)sys_shutdown);
