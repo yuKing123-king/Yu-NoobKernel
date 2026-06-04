@@ -67,8 +67,10 @@ QEMU_FLAGS = -nographic -machine virt -m 128M -d unimp -kernel $(TARGET)
 QEMU_FLAGS += -global virtio-mmio.force-legacy=false
 QEMU_FLAGS += -drive file=fs.img,if=none,format=raw,id=x0
 QEMU_FLAGS += -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+QEMU_FLAGS += -drive file=disk.img,if=none,format=raw,id=x1
+QEMU_FLAGS += -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
 QEMU_FLAGS += -netdev user,id=net0
-QEMU_FLAGS += -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.1
+QEMU_FLAGS += -device virtio-net-device,netdev=net0,bus=virtio-mmio-bus.2
 
 QEMUGDB = -gdb tcp::$(GDB_PORT)
 
@@ -104,6 +106,10 @@ $(TARGET): $(MODULE_OBJS) $(BUILD_DIR)/initcode.o
 	@$(OBJDUMP) -S $(TARGET) > $@.asm
 	$(call log,OBJDUMP,$@.sym)
 	@$(OBJDUMP) -t $(TARGET) | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $@.sym
+
+# sha2.c triggers GCC ICE with -O0 on some riscv64-unknown-elf-gcc versions
+# (SSA coalescer crash in rewrite_out_of_ssa). Compile with -O1 as workaround.
+$(BUILD_DIR)/misc/sha2.c.o: C_FLAGS := $(filter-out -O0,$(C_FLAGS)) -O1
 
 # ============================================================
 # 用户态 init 程序 (C 语言测试运行器)
@@ -182,7 +188,7 @@ clean:
 	@rm -rf $(BUILD_DIR)
 	@rm -f $(KERNEL_RV) $(KERNEL_LA) $(DISK_IMG)
 
-run: $(TARGET)
+run: $(TARGET) $(DISK_IMG)
 	$(call log,RUN,$(ARCH))
 	@$(QEMU_RV) $(QEMU_FLAGS)
 
