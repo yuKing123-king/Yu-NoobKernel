@@ -670,6 +670,8 @@ static int ext4_readdir(struct file *file, struct dirent *dirent_buf,
 			   size_t count);
 static loff_t ext4_llseek(struct file *file, loff_t offset, int whence);
 static int ext4_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode);
+static int ext4_create(struct inode *dir, struct dentry *dentry, umode_t mode);
+static int ext4_unlink(struct inode *dir, struct dentry *dentry);
 
 struct super_operations ext4_super_ops = {
 	.alloc_inode   = ext4_alloc_inode,
@@ -682,6 +684,8 @@ struct super_operations ext4_super_ops = {
 struct inode_operations ext4_dir_inode_ops = {
 	.lookup = ext4_lookup,
 	.mkdir  = ext4_mkdir,
+	.create = ext4_create,
+	.unlink = ext4_unlink,
 };
 
 struct file_operations ext4_file_operations = {
@@ -894,6 +898,173 @@ static int ext4_add_dir_entry(struct inode *dir, u32 ino, const char *name,
         inode_dirty(dir);
 
         kfree(buf);
+        return 0;
+}
+
+/* inode_operations: unlink (remove a directory entry) */
+static int ext4_unlink(struct inode *dir, struct dentry *dentry)
+{
+        struct super_block *sb = dir->i_sb;
+        struct ext4_sb_info *sbi = ext4_get_sbi(sb);
+        struct ext4_inode *raw = (struct ext4_inode *)dir->i_private;
+        u32 block_size = sbi->block_size;
+        u64 dir_size = dir->i_size;
+
+        const char *name = dentry->d_name.name;
+        int namelen = dentry->d_name.len;
+
+        /* Read the full directory content */
+        u8 *buf = kzalloc(dir_size < block_size ? block_size : (u32)dir_size);
+        if (!buf)
+                return -ENOMEM;
+
+        ssize_t ret = ext4_read_data(sb, raw, 0, buf, dir_size);
+        if (ret < 0) {
+                kfree(buf);
+                return ret;
+        }
+
+        /* Walk entries to find the target */
+        u64 offset = 0;
+        int found = 0;
+        u64 entry_off = 0;
+
+        while (offset < dir_size) {
+                struct ext4_dirent *de = (struct ext4_dirent *)(buf + offset);
+                if (de->inode == 0 || de->rec_len == 0)
+                        break;
+
+                if (de->name_len == (u8)namelen &&
+                    memcmp(de->name, name, namelen) == 0) {
+                        found = 1;
+                        entry_off = offset;
+                        break;
+                }
+                offset += de->rec_len;
+        }
+
+        if (!found) {
+                kfree(buf);
+                return -ENOENT;
+        }
+
+        /* Mark the entry as deleted */
+        struct ext4_dirent *de = (struct ext4_dirent *)(buf + entry_off);
+        u32 deleted_ino = de->inode;
+        de->inode = 0;
+
+        /* Write back the directory block */
+        u32 logical_block = (u32)(entry_off / block_size);
+        u32 phys_block;
+        if (raw->i_flags & EXT4_EXTENTS_FL) {
+                phys_block = ext4_find_extent_block(sbi, raw, logical_block);
+        } else {
+                if (logical_block < EXT4_DIRECT_BLOCKS)
+                        phys_block = raw->i_block[logical_block];
+                else
+                        phys_block = ~0U;
+        }
+
+        if (phys_block == ~0U) {
+                kfree(buf);
+                return -EIO;
+        }
+
+        u64 byte_off = (u64)phys_block * block_size;
+        ext4_write_at(sbi->dev, byte_off, buf + logical_block * block_size,
+                      block_size);
+
+        kfree(buf);
+
+        /* Decrement target inode's i_links_count */
+        u32 ino = deleted_ino;
+        u32 bg_idx = (ino - 1) / sbi->inodes_per_group;
+        u32 bg_ino_idx = (ino - 1) % sbi->inodes_per_group;
+        struct ext4_group_desc bgd;
+
+        if (ext4_read_group_desc(sbi, bg_idx, &bgd) == 0) {
+                u64 inode_table_off = (u64)bgd.bg_inode_table_lo * block_size;
+                u64 inode_disk_off = inode_table_off +
+                                     (u64)bg_ino_idx * sbi->inode_size;
+
+                struct ext4_inode target_raw;
+                int r = ext4_read_at(sbi->dev, inode_disk_off, &target_raw,
+                                     sizeof(target_raw));
+                if (r == 0) {
+                        if (target_raw.i_links_count > 0)
+                                target_raw.i_links_count--;
+                        ext4_write_at(sbi->dev, inode_disk_off, &target_raw,
+                                      sizeof(target_raw));
+                }
+        }
+
+        /* Update parent inode's mtime and mark dirty */
+        dir->i_mtime = 0;
+        inode_dirty(dir);
+
+        return 0;
+}
+
+/* inode_operations: create (regular file) */
+static int ext4_create(struct inode *dir, struct dentry *dentry, umode_t mode)
+{
+        struct super_block *sb = dir->i_sb;
+        struct ext4_sb_info *sbi = ext4_get_sbi(sb);
+        u32 block_size = sbi->block_size;
+
+        /* Allocate inode */
+        u32 ino = ext4_alloc_inode_from_disk(sb);
+        if (ino == 0)
+                return -ENOSPC;
+
+        /* Build the raw inode on disk (regular file, size=0, no data blocks) */
+        struct ext4_inode raw_inode;
+        memset(&raw_inode, 0, sizeof(raw_inode));
+        raw_inode.i_mode       = EXT4_S_IFREG | (mode & 0777);
+        raw_inode.i_uid        = 0;
+        raw_inode.i_gid        = 0;
+        raw_inode.i_size_lo    = 0;
+        raw_inode.i_size_high  = 0;
+        raw_inode.i_links_count = 1;
+        raw_inode.i_blocks_lo  = 0;
+        raw_inode.i_flags      = 0;
+
+        /* Write raw inode to disk */
+        u32 bg_idx     = (ino - 1) / sbi->inodes_per_group;
+        u32 bg_ino_idx = (ino - 1) % sbi->inodes_per_group;
+        struct ext4_group_desc bgd;
+        if (ext4_read_group_desc(sbi, bg_idx, &bgd) == 0) {
+                u64 inode_table_off = (u64)bgd.bg_inode_table_lo * block_size;
+                u64 inode_off = inode_table_off + (u64)bg_ino_idx * sbi->inode_size;
+                ext4_write_at(sbi->dev, inode_off, &raw_inode, sizeof(raw_inode));
+        }
+
+        /* Add entry to parent directory */
+        ext4_add_dir_entry(dir, ino, dentry->d_name.name, dentry->d_name.len,
+                           EXT4_FT_REG_FILE);
+
+        /* Create VFS inode and associate with dentry */
+        struct inode *child_inode = inode_get(sb, ino);
+        if (!child_inode)
+                return -ENOMEM;
+
+        if (!child_inode->i_private) {
+                int ret = ext4_read_inode(sb, child_inode);
+                if (ret < 0) {
+                        inode_put(child_inode);
+                        return ret;
+                }
+        }
+
+        child_inode->i_op   = NULL;
+        child_inode->i_fop  = &ext4_file_operations;
+        child_inode->i_sb   = sb;
+        child_inode->i_mode = S_IFREG | (mode & 0777);
+        child_inode->i_nlink = 1;
+
+        dentry->d_inode = child_inode;
+        dentry->d_sb    = sb;
+
         return 0;
 }
 
