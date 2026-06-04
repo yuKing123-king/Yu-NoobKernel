@@ -61,6 +61,7 @@ void vfs_mount_get(struct mount *mnt);
 void vfs_mount_put(struct mount *mnt);
 
 struct file *vfs_open(const char *path, u32 flags);
+struct file *vfs_open_cwd(const char *path, u32 flags, struct dentry *base);
 int vfs_close(struct file *file);
 ssize_t vfs_read(struct file *file, void *buf, size_t count);
 ssize_t vfs_write(struct file *file, const void *buf, size_t count);
@@ -68,8 +69,10 @@ loff_t vfs_lseek(struct file *file, loff_t offset, int whence);
 ssize_t vfs_getdents(struct file *file, struct dirent *buf, size_t count);
 
 int vfs_mkdir(const char *path, umode_t mode);
+int vfs_mkdir_cwd(const char *path, umode_t mode, struct dentry *base);
 int vfs_rmdir(const char *path);
 int vfs_unlink(const char *path);
+int vfs_unlink_cwd(const char *path, struct dentry *base);
 int vfs_create(const char *path, umode_t mode);
 int vfs_rename(const char *old_path, const char *new_path);
 

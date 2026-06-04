@@ -398,13 +398,18 @@ void vfs_mount_put(struct mount *mnt)
  */
 struct file *vfs_open(const char *path, u32 flags)
 {
+	return vfs_open_cwd(path, flags, NULL);
+}
+
+struct file *vfs_open_cwd(const char *path, u32 flags, struct dentry *base)
+{
 	if (!path) {
 		return PTR(-EINVAL);
 	}
 
-	tracef("vfs_open: path='%s', flags=0x%x", path, flags);
+	tracef("vfs_open_cwd: path='%s', flags=0x%x, base=%p", path, flags, base);
 
-	struct dentry *dentry = vfs_path_lookup(NULL, path, LOOKUP_FOLLOW);
+	struct dentry *dentry = vfs_path_lookup(base, path, LOOKUP_FOLLOW);
 	tracef("vfs_path_lookup returned: %p (IS_ERR=%d)", dentry,
 	       IS_ERR(dentry));
 
@@ -412,7 +417,7 @@ struct file *vfs_open(const char *path, u32 flags)
 		if ((flags & O_CREAT) && PTR_ERR(dentry) == -ENOENT) {
 			struct path parent;
 			struct qstr last;
-			int ret = vfs_path_parent(NULL, path, &parent, &last);
+			int ret = vfs_path_parent(base, path, &parent, &last);
 			if (ret < 0) {
 				return PTR((long)ret);
 			}
@@ -547,13 +552,18 @@ loff_t vfs_lseek(struct file *file, loff_t offset, int whence)
  */
 int vfs_mkdir(const char *path, umode_t mode)
 {
+	return vfs_mkdir_cwd(path, mode, NULL);
+}
+
+int vfs_mkdir_cwd(const char *path, umode_t mode, struct dentry *base)
+{
 	if (!path) {
 		return -EINVAL;
 	}
 
 	struct path parent;
 	struct qstr last;
-	int ret = vfs_path_parent(NULL, path, &parent, &last);
+	int ret = vfs_path_parent(base, path, &parent, &last);
 	if (ret < 0) {
 		return ret;
 	}
@@ -648,11 +658,16 @@ int vfs_rmdir(const char *path)
  */
 int vfs_unlink(const char *path)
 {
+	return vfs_unlink_cwd(path, NULL);
+}
+
+int vfs_unlink_cwd(const char *path, struct dentry *base)
+{
 	if (!path) {
 		return -EINVAL;
 	}
 
-	struct dentry *dentry = vfs_path_lookup(NULL, path, LOOKUP_FOLLOW);
+	struct dentry *dentry = vfs_path_lookup(base, path, LOOKUP_FOLLOW);
 	if (IS_ERR(dentry)) {
 		return PTR_ERR(dentry);
 	}
