@@ -1215,7 +1215,8 @@ uintptr_t sys_chdir(uintptr_t pathname)
 	if (copyinstr(p->pagetable, path, pathname, sizeof(path)) < 0)
 		return -EFAULT;
 
-	struct dentry *dentry = vfs_path_lookup(NULL, path, LOOKUP_FOLLOW);
+	struct dentry *dentry = vfs_path_lookup(
+		    path[0] == '/' ? NULL : p->pwd, path, LOOKUP_FOLLOW);
 	if (IS_ERR(dentry) || !dentry)
 		return dentry ? PTR_ERR(dentry) : -ENOENT;
 
