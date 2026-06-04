@@ -22,6 +22,7 @@
 #include <hal/riscv.h>
 #include <misc/cputime.h>
 #include <hal/timer.h>
+#include <hal/blk.h>
 
 extern pagetable_t kpagetable;
 
@@ -1215,8 +1216,8 @@ uintptr_t sys_chdir(uintptr_t pathname)
 	if (copyinstr(p->pagetable, path, pathname, sizeof(path)) < 0)
 		return -EFAULT;
 
-	struct dentry *dentry = vfs_path_lookup(
-		    path[0] == '/' ? NULL : p->pwd, path, LOOKUP_FOLLOW);
+	struct dentry *dentry = vfs_path_lookup(path[0] == '/' ? 
+										NULL : p->pwd, path, LOOKUP_FOLLOW);
 	if (IS_ERR(dentry) || !dentry)
 		return dentry ? PTR_ERR(dentry) : -ENOENT;
 
@@ -1332,20 +1333,83 @@ uintptr_t sys_fstatat(uintptr_t dirfd, uintptr_t pathname, uintptr_t statbuf,
 }
 
 /* ============================================================
- * FS: mount / umount (stub — 不支持 vfat)
+ * FS: mount / umount (stub --- 不支持 vfat)
  * ============================================================ */
+
+/* Parse /dev/vda{N} path to dev_t
+   vda  -> MKDEV(BLK_MAJOR_VIRTIO, 0)
+   vda2 -> MKDEV(BLK_MAJOR_VIRTIO, 1) */
+static int parse_dev_path(const char *dev_path, dev_t *out)
+{
+	const char *name;
+	if (strncmp(dev_path, "/dev/", 5) == 0)
+		name = dev_path + 5;
+	else
+		return -ENODEV;
+
+	if (name[0] != 'v' || name[1] != 'd')
+		return -ENODEV;
+
+	const char *p = name + 2;
+	while (*p >= 'a' && *p <= 'z')
+		p++;
+
+	int minor = 0;
+	if (*p >= '1' && *p <= '9')
+		minor = (*p - '0') - 1;
+
+	*out = MKDEV(BLK_MAJOR_VIRTIO, minor);
+	return 0;
+}
 
 uintptr_t sys_mount(uintptr_t dev, uintptr_t dir, uintptr_t type,
 		   uintptr_t flags, uintptr_t data)
 {
-	(void)dev; (void)dir; (void)type; (void)flags; (void)data;
-	return -ENODEV;
+	struct proc *p = curproc();
+	char dev_path[256], dir_path[256], fstype[64];
+
+	(void)flags;
+	(void)data;
+
+	if (copyinstr(p->pagetable, dev_path, dev, sizeof(dev_path)) < 0)
+		return -EFAULT;
+	if (copyinstr(p->pagetable, dir_path, dir, sizeof(dir_path)) < 0)
+		return -EFAULT;
+	if (copyinstr(p->pagetable, fstype, type, sizeof(fstype)) < 0)
+		return -EFAULT;
+
+	dev_t devno;
+	if (parse_dev_path(dev_path, &devno) < 0)
+		return -ENODEV;
+
+	if (!blk_lookup(devno))
+		return -ENODEV;
+
+	struct file_system_type *fs = get_fs(fstype);
+	if (!fs) {
+		fs = get_fs("ext4");
+		if (!fs)
+			return -ENODEV;
+	}
+
+	struct dentry *base = (dir_path[0] == '/') ? NULL : p->pwd;
+	return vfs_mount_at(base, dir_path, fs, devno);
 }
 
 uintptr_t sys_umount(uintptr_t target, uintptr_t flags)
 {
-	(void)target; (void)flags;
-	return -ENODEV;
+	struct proc *p = curproc();
+	char target_path[256];
+
+	(void)flags;
+
+	if (copyinstr(p->pagetable, target_path, target,
+		      sizeof(target_path)) < 0)
+		return -EFAULT;
+
+	struct dentry *base =
+		(target_path[0] == '/') ? NULL : p->pwd;
+	return vfs_umount_at(base, target_path);
 }
 
 /* ============================================================
