@@ -127,15 +127,7 @@ int ext4_fill_super(struct super_block *vsb, dev_t dev, void *data)
 	/* Descriptors per block: each descriptor is 32 bytes */
 	sbi->desc_per_block = sbi->block_size / sizeof(struct ext4_group_desc);
 
-	infof("ext4: blocks=%u bsize=%u groups=%u inodes=%u",
-	      sbi->sb.s_blocks_count_lo, sbi->block_size,
-	      sbi->groups_count, sbi->sb.s_inodes_count);
-
-	/* Check for extents — we require it for file reading */
-	if (sbi->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS)
-		infof("ext4: extents enabled");
-	if (sbi->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_FLEX_BG)
-		infof("ext4: flex_bg enabled");
+	/* ext4: extents and flex_bg feature checks (informational only) */
 
 	vsb->s_fs_info     = sbi;
 	vsb->s_blocksize   = sbi->block_size;
@@ -640,7 +632,6 @@ static void ext4_put_super(struct super_block *sb)
 {
 	struct ext4_sb_info *sbi = ext4_get_sbi(sb);
 	if (sbi) {
-		infof("ext4: unmounting");
 		kfree(sbi);
 		sb->s_fs_info = NULL;
 	}
@@ -1258,8 +1249,8 @@ struct super_block *ext4_mount(struct file_system_type *fs_type,
 		super_free(sb);
 		return PTR(-ENOMEM);
 	}
-
 	root_inode->i_ino = 2;  /* EXT4_ROOT_INO */
+
 	ret = ext4_read_inode(sb, root_inode);
 	if (ret < 0) {
 		inode_free(root_inode);
@@ -1282,8 +1273,6 @@ struct super_block *ext4_mount(struct file_system_type *fs_type,
 	}
 	root_dentry->d_inode = root_inode;
 	sb->s_root = root_dentry;
-	infof("ext4: mounted, root inode=%llu, size=%llu",
-	      root_inode->i_ino, root_inode->i_size);
 
 	return sb;
 }
