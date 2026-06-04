@@ -75,6 +75,8 @@ typedef u64 time_t;
 #define DT_SOCK 12
 #define DT_WHT 14
 
+#define AT_FDCWD (-100)
+
 #define NAME_MAX 255
 #define PATH_MAX 4096
 

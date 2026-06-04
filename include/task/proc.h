@@ -99,6 +99,7 @@ struct proc {
 	uintptr_t brk_end;
 	struct wait_queue child_wait;
 	bool vm_shared;		/* CLONE_VM: pagetable shared with parent */
+	int *clear_child_tid;	/* set_tid_address: futex word to clear on exit */
 
 	struct fd_table *fd_table;
 	struct dentry *pwd;
