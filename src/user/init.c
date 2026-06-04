@@ -1,6 +1,7 @@
 /*
  * init.c — 比赛测试运行器
- * 启动后扫描根目录找 *_testcode.sh，输出 markers 并尝试执行测试 ELF
+ * 启动后扫描根目录找 *_testcode.sh，提取组名，
+ * 然后进入对应子目录 (如 /basic/) 扫描并运行所有 ELF 测试
  */
 
 /* Syscall 编号 (Linux RISC-V ABI) */
@@ -15,6 +16,7 @@
 #define SYS_brk         214
 #define SYS_wait4       260
 #define SYS_shutdown    500
+#define SYS_chdir       49
 
 /* openat flags */
 #define O_RDONLY    0
@@ -22,6 +24,7 @@
 
 /* file types (Linux d_type) */
 #define DT_REG       8
+#define DT_DIR       4
 
 /* dirent 结构（Linux getdents64 ABI） */
 struct linux_dirent64 {
@@ -41,6 +44,18 @@ static long syscall1(long n, long a0)
 	return _a0;
 }
 
+static long syscall2(long n, long a0, long a1)
+{
+	register long a7 asm("a7") = n;
+	register long _a0 asm("a0") = a0;
+	register long _a1 asm("a1") = a1;
+	asm volatile("ecall"
+		     : "+r"(_a0)
+		     : "r"(a7), "r"(_a1)
+		     : "memory");
+	return _a0;
+}
+
 static long syscall3(long n, long a0, long a1, long a2)
 {
 	register long a7 asm("a7") = n;
@@ -48,9 +63,9 @@ static long syscall3(long n, long a0, long a1, long a2)
 	register long _a1 asm("a1") = a1;
 	register long _a2 asm("a2") = a2;
 	asm volatile("ecall"
-			     : "+r"(_a0)
-			     : "r"(a7), "r"(_a1), "r"(_a2)
-			     : "memory");
+		     : "+r"(_a0)
+		     : "r"(a7), "r"(_a1), "r"(_a2)
+		     : "memory");
 	return _a0;
 }
 
@@ -62,9 +77,9 @@ static long syscall4(long n, long a0, long a1, long a2, long a3)
 	register long _a2 asm("a2") = a2;
 	register long _a3 asm("a3") = a3;
 	asm volatile("ecall"
-			     : "+r"(_a0)
-			     : "r"(a7), "r"(_a1), "r"(_a2), "r"(_a3)
-			     : "memory");
+		     : "+r"(_a0)
+		     : "r"(a7), "r"(_a1), "r"(_a2), "r"(_a3)
+		     : "memory");
 	return _a0;
 }
 
@@ -134,11 +149,16 @@ static long my_getdents64(int fd, void *buf, int len)
 	return syscall3(SYS_getdents64, fd, (long)buf, len);
 }
 
+static long my_chdir(const char *path)
+{
+	return syscall1(SYS_chdir, (long)path);
+}
+
 static long my_fork(void)
 {
 	register long a7 asm("a7") = SYS_fork;
 	register long _a0 asm("a0") = 0;
-	register long _a1 asm("a1") = 0;  /* child_stack = 0: fork 行为 */
+	register long _a1 asm("a1") = 0;
 	asm volatile("ecall" : "+r"(_a0) : "r"(a7), "r"(_a1) : "memory");
 	return _a0;
 }
@@ -165,6 +185,12 @@ static void my_shutdown(void)
 }
 static long heap_end = 0;
 
+#define MAX_GROUPS 16
+#define MAX_NAME    64
+
+static char groups[MAX_GROUPS][MAX_NAME];
+static int group_count = 0;
+
 static int is_test_script(const char *name)
 {
 	int len = my_strlen(name);
@@ -182,14 +208,8 @@ static int extract_group(const char *name, char *out, int maxlen)
 	return 0;
 }
 
-static int is_elf(const char *name)
+static int is_elf_path(const char *path)
 {
-	char path[128];
-	path[0] = '/';
-	int len = 0;
-	while (name[len] && len < 126) len++;
-	for (int i = 0; i < len; i++) path[i+1] = name[i];
-	path[len+1] = 0;
 	int fd = my_openat(-100, path, O_RDONLY);
 	if (fd < 0) return 0;
 	char magic[4];
@@ -197,6 +217,75 @@ static int is_elf(const char *name)
 	my_close(fd);
 	return n == 4 && magic[0] == 0x7f && magic[1] == 'E' &&
 	       magic[2] == 'L' && magic[3] == 'F';
+}
+
+static int is_shell_needed(const char *name)
+{
+	if (my_strcmp(name, "busybox") == 0 ||
+	    my_strcmp(name, "lua") == 0 ||
+	    my_strcmp(name, "libctest") == 0 ||
+	    my_strcmp(name, "unixbench") == 0 ||
+	    my_strcmp(name, "iozone") == 0 ||
+	    my_strcmp(name, "iperf") == 0 ||
+	    my_strcmp(name, "libcbench") == 0 ||
+	    my_strcmp(name, "lmbench") == 0 ||
+	    my_strcmp(name, "cyclictest") == 0 ||
+	    my_strcmp(name, "netperf") == 0 ||
+	    my_strcmp(name, "ltp") == 0)
+		return 1;
+	return 0;
+}
+
+/* 在子目录 dirpath 下运行所有 ELF 文件 */
+static void run_elfs_in_dir(const char *dirpath)
+{
+	int fd = my_openat(-100, dirpath, O_RDONLY | O_DIRECTORY);
+	if (fd < 0) return;
+
+	char buf[4096];
+	long nread;
+
+	/* 循环调用 getdents64 直到读完所有条目 */
+	while ((nread = my_getdents64(fd, buf, sizeof(buf))) > 0) {
+		int pos = 0;
+		while (pos < (int)nread) {
+			struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + pos);
+			if (d->d_reclen == 0) break;
+			char *name = d->d_name;
+			if (name[0] == '.' && (name[1] == '\0' ||
+			    (name[1] == '.' && name[2] == '\0'))) {
+				pos += d->d_reclen;
+				continue;
+			}
+			if (d->d_type == DT_REG) {
+				char path[256];
+				my_strcpy(path, dirpath);
+				my_strcat(path, name);
+
+				if (is_elf_path(path)) {
+					prints("[RUN] ");
+					prints(path);
+					println();
+
+					long cpid = my_fork();
+					if (cpid == 0) {
+						/* chdir 使 ./text.txt 等相对路径正确解析 */
+						my_chdir(dirpath);
+						long argv[2] = { (long)path, 0 };
+						long ret = my_execve(path, (long)argv, 0);
+						prints("[FAIL] execve failed: ");
+						printn(ret);
+						println();
+						my_exit(127);
+					}
+					int status = 0;
+					my_wait4(cpid, &status, 0, 0);
+				}
+			}
+			pos += d->d_reclen;
+		}
+	}
+	my_close(fd);
 }
 
 __attribute__((section(".text.entry"), noinline, noreturn))
@@ -207,101 +296,72 @@ void _start(void)
 	prints("#### OS COMP TEST START ####");
 	println();
 
+	/* 第一次扫描根目录：收集 testcode 脚本组名 */
 	int fd = my_openat(-100, "/", O_RDONLY | O_DIRECTORY);
 	if (fd < 0) { my_exit(1); }
 
 	char buf[4096];
-	int total_scripts = 0;
-
-	/* 第一次扫描：输出 markers */
-	my_getdents64(fd, buf, sizeof(buf));
-
-	int pos = 0;
-	while (pos < 4096) {
-		struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + pos);
-		if (d->d_reclen == 0) break;
-		char *name = d->d_name;
-		if (name[0] == '.' && (name[1] == '\0' ||
-		    (name[1] == '.' && name[2] == '\0'))) {
-			pos += d->d_reclen;
-			continue;
-		}
-		if (is_test_script(name)) {
-			char group[64];
-			if (extract_group(name, group, 64) == 0) {
-				prints("#### OS COMP TEST GROUP START ");
-				prints(group);
-				prints(" ####");
-				println();
-				total_scripts++;
-			}
-		}
-		pos += d->d_reclen;
-	}
-	my_close(fd);
-
-	if (total_scripts == 0) {
-		prints("No test scripts found.");
-		println();
-		prints("#### OS COMP TEST END ####");
-		println();
-		my_shutdown();
-		my_exit(0);
-	}
-
-	/* 第二次扫描：fork + execve ELF */
-	fd = my_openat(-100, "/", O_RDONLY | O_DIRECTORY);
-	if (fd < 0) { my_exit(1); }
-	my_getdents64(fd, buf, sizeof(buf));
-	my_close(fd);
-
-	pos = 0;
-	while (pos < 4096) {
-		struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + pos);
-		if (d->d_reclen == 0) break;
-		char *name = d->d_name;
-		if (name[0] == '.' && (name[1] == '\0' ||
-		    (name[1] == '.' && name[2] == '\0'))) {
-			pos += d->d_reclen;
-			continue;
-		}
-
-		if (d->d_type == DT_REG && is_elf(name)) {
-			char path[128];
-			int nlen = my_strlen(name);
-			if (nlen > 120) {
+	long nread;
+	while ((nread = my_getdents64(fd, buf, sizeof(buf))) > 0) {
+		int pos = 0;
+		while (pos < (int)nread) {
+			struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + pos);
+			if (d->d_reclen == 0) break;
+			char *name = d->d_name;
+			if (name[0] == '.' && (name[1] == '\0' ||
+			    (name[1] == '.' && name[2] == '\0'))) {
 				pos += d->d_reclen;
 				continue;
 			}
-			my_strcpy(path, "/");
-			my_strcat(path, name);
+			if (is_test_script(name) && group_count < MAX_GROUPS) {
+				extract_group(name, groups[group_count], MAX_NAME);
+				group_count++;
+			}
+			pos += d->d_reclen;
+		}
+	}
+	my_close(fd);
 
-			prints("[RUN] ");
-			prints(path);
+	/* 对每个组：输出 markers，进入子目录运行 ELF */
+	for (int g = 0; g < group_count; g++) {
+		if (is_shell_needed(groups[g])) {
+			/* 跳过需要 shell 的组，仅输出 markers */
+			prints("#### OS COMP TEST GROUP START ");
+			prints(groups[g]);
+			prints(" ####");
 			println();
-
-			long cpid = my_fork();
-			if (cpid == 0) {
-				/* 子进程：execve 测试 ELF */
-				long argv[2] = { (long)path, 0 };
-				long ret = my_execve(path, (long)argv, 0);
-				/* 如果 execve 成功，不会到这里 */
-				prints("[FAIL] execve failed: ");
-				printn(ret);
-				println();
-				my_exit(127);
-			}
-			int status = 0;
-			long wret = my_wait4(cpid, &status, 0, 0);
-			if (wret < 0) {
-				prints("[WAIT] failed: ");
-				printn(wret);
-				println();
-			}
+			prints("#### OS COMP TEST GROUP END ");
+			prints(groups[g]);
+			prints(" ####");
+			println();
+			continue;
 		}
 
-		pos += d->d_reclen;
+		char dirpath[256];
+		my_strcpy(dirpath, "/");
+		my_strcat(dirpath, groups[g]);
+		my_strcat(dirpath, "/");
+
+		/* 检查子目录是否存在 */
+		int test_fd = my_openat(-100, dirpath, O_RDONLY | O_DIRECTORY);
+		if (test_fd < 0) continue;
+		my_close(test_fd);
+
+		prints("#### OS COMP TEST GROUP START ");
+		prints(groups[g]);
+		prints(" ####");
+		println();
+
+		run_elfs_in_dir(dirpath);
+
+		prints("#### OS COMP TEST GROUP END ");
+		prints(groups[g]);
+		prints(" ####");
+		println();
 	}
+
+	/* 也运行根目录下的 ELF（兼容旧格式 fs.img）*/
+	run_elfs_in_dir("/");
 
 	prints("#### OS COMP TEST END ####");
 	println();
