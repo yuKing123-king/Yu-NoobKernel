@@ -3,6 +3,7 @@
 #include <hal/plic.h>
 #include <hal/riscv.h>
 #include <hal/device_types.h>
+#include <misc/cputime.h>
 #include <mm/bcache.h>
 #include <config.h>
 #include <misc/string.h>
@@ -108,6 +109,7 @@ static int virtio_blk_rw_internal(struct block_device *dev, u64 sector,
 
 	virtq_kick(vq);
 
+	uint64_t deadline = r_time() + sec_to_cputime(5);
 	while (!req->completed) {
 		if (virtq_has_buf(vq)) {
 			u32 len;
@@ -116,6 +118,12 @@ static int virtio_blk_rw_internal(struct block_device *dev, u64 sector,
 			if (done) {
 				done->completed = true;
 			}
+		}
+		if (r_time() > deadline) {
+			errorf("virtio_blk_rw: timeout, sector=%llu, nsectors=%u",
+			       sector, nsectors);
+			kfree(req);
+			return -1;
 		}
 	}
 
