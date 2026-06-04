@@ -149,8 +149,6 @@ struct super_block *vfs_mount(struct file_system_type *fs_type, dev_t dev,
 	list_add(&sb->s_list, &vfs_state.super_list);
 	spinlock_release(&vfs_state.lock);
 
-	infof("mounted filesystem '%s' on device %d:%d", fs_type->name,
-	      MAJOR(dev), MINOR(dev));
 	return sb;
 }
 
@@ -173,7 +171,6 @@ int vfs_umount(struct super_block *sb)
 		sb->s_type->kill_sb(sb);
 	}
 
-	infof("unmounted filesystem");
 	return 0;
 }
 
@@ -275,8 +272,132 @@ int vfs_mount_to(const char *target_path, struct file_system_type *fs_type,
 	list_add(&mnt->mnt_child, &vfs_state.mount_list);
 	spinlock_release(&vfs_state.lock);
 
-	infof("mounted filesystem '%s' at '%s'", fs_type->name, target_path);
 	return 0;
+}
+
+/*
+ * 挂载文件系统到指定路径（支持 CWD base）
+ * @param base: CWD dentry，绝对路径时为 NULL
+ * @param target_path: 目标挂载点路径
+ * @param fs_type: 文件系统类型指针
+ * @param dev: 设备号
+ * @return: 成功返回0，失败返回负的错误码
+ */
+int vfs_mount_at(struct dentry *base, const char *target_path,
+		 struct file_system_type *fs_type, dev_t dev)
+{
+	if (!target_path || !fs_type)
+		return -EINVAL;
+
+	struct dentry *mountpoint =
+		vfs_path_lookup(base, target_path, LOOKUP_FOLLOW);
+	if (IS_ERR(mountpoint))
+		return PTR_ERR(mountpoint);
+
+	if (!mountpoint->d_inode || !S_ISDIR(mountpoint->d_inode->i_mode)) {
+		dentry_put(mountpoint);
+		return -ENOTDIR;
+	}
+
+	struct super_block *sb = vfs_mount(fs_type, dev, NULL);
+	if (IS_ERR(sb)) {
+		dentry_put(mountpoint);
+		return PTR_ERR(sb);
+	}
+
+	struct mount *mnt = kmalloc(sizeof(struct mount));
+	if (!mnt) {
+		vfs_umount(sb);
+		dentry_put(mountpoint);
+		return -ENOMEM;
+	}
+
+	struct mount *root_mnt = vfs_get_root_mount();
+	if (!root_mnt) {
+		kfree(mnt);
+		vfs_umount(sb);
+		dentry_put(mountpoint);
+		return -ENOENT;
+	}
+
+	mnt->mnt_parent = root_mnt;
+	mnt->mnt_mountpoint = mountpoint;
+	mnt->mnt_root = sb->s_root;
+	mnt->mnt_sb = sb;
+	INIT_LIST_HEAD(&mnt->mnt_mounts);
+	INIT_LIST_HEAD(&mnt->mnt_child);
+	mnt->mnt_lock = SPINLOCK_INITIALIZER("mount");
+	mnt->mnt_flags = 0;
+	mnt->mnt_refcnt = 1;
+
+	spinlock_acquire(&vfs_state.lock);
+	list_add(&mnt->mnt_mounts, &root_mnt->mnt_mounts);
+	list_add(&mnt->mnt_child, &vfs_state.mount_list);
+	spinlock_release(&vfs_state.lock);
+
+	return 0;
+}
+
+/*
+ * 卸载指定路径的文件系统（支持 CWD base）
+ */
+int vfs_umount_at(struct dentry *base, const char *target_path)
+{
+	if (!target_path)
+		return -EINVAL;
+
+	/* 使用 vfs_path_parent 解析父目录和末组件名
+	   避免 vfs_path_lookup 的 follow_mount 跳过挂载点 dentry */
+	struct path parent;
+	struct qstr last;
+	int ret = vfs_path_parent(base, target_path, &parent, &last);
+	if (ret < 0)
+		return ret;
+
+	if (!parent.dentry || !parent.dentry->d_inode) {
+		kfree(last.name);
+		dentry_put(parent.dentry);
+		return -ENOENT;
+	}
+
+	/* 遍历 mount 列表，匹配 mnt_mountpoint
+	   使用 inode 指针比较（而非 dentry 指针比较），因为路径中的 "."
+	   会产生不同的 dentry 对象指向同一个目录 */
+	struct mount *mnt = NULL;
+	spinlock_acquire(&vfs_state.lock);
+	list_for_each_entry(mnt, &vfs_state.mount_list, mnt_child)
+	{
+		struct dentry *mp = mnt->mnt_mountpoint;
+		if (mp && mp->d_parent && mp->d_parent->d_inode &&
+		    mp->d_parent->d_inode == parent.dentry->d_inode &&
+		    mp->d_name.len == last.len &&
+		    strcmp(mp->d_name.name, last.name) == 0)
+		{
+			/* Found! 在锁内删除 */
+			list_del(&mnt->mnt_child);
+			if (mnt->mnt_parent)
+				list_del(&mnt->mnt_mounts);
+			spinlock_release(&vfs_state.lock);
+			goto found_mnt;
+		}
+	}
+	spinlock_release(&vfs_state.lock);
+
+	kfree(last.name);
+	dentry_put(parent.dentry);
+	return -EINVAL;
+
+found_mnt:
+	kfree(last.name);
+	dentry_put(parent.dentry);
+
+	struct super_block *sb = mnt->mnt_sb;
+	struct dentry *mpt = mnt->mnt_mountpoint;
+
+	kfree(mnt);
+	dentry_put(mpt);
+
+	return vfs_umount(sb);
 }
 
 /*
