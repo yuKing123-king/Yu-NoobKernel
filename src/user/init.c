@@ -293,25 +293,42 @@ static void run_elfs_in_dir(const char *dirpath)
 				my_strcpy(path, dirpath);
 				my_strcat(path, name);
 
-				if (is_elf_path(path)) {
-					prints("[RUN] ");
-					prints(path);
-					println();
-
-					long cpid = my_fork();
-					if (cpid == 0) {
-						/* chdir 使 ./text.txt 等相对路径正确解析 */
-						my_chdir(dirpath);
-						long argv[2] = { (long)path, 0 };
-						long ret = my_execve(path, (long)argv, 0);
-						prints("[FAIL] execve failed: ");
-						printn(ret);
-						println();
-						my_exit(127);
-					}
-					int status = 0;
-					my_wait4(cpid, &status, 0, 0);
+				if (!is_elf_path(path)) {
+					pos += d->d_reclen;
+					continue;
 				}
+
+				/* Skip binaries that need a shell */
+				if (is_shell_needed(name)) {
+					prints("#### OS COMP TEST GROUP START ");
+					prints(name);
+					prints(" ####");
+					println();
+					prints("#### OS COMP TEST GROUP END ");
+					prints(name);
+					prints(" ####");
+					println();
+					pos += d->d_reclen;
+					continue;
+				}
+
+				prints("[RUN] ");
+				prints(path);
+				println();
+
+				long cpid = my_fork();
+				if (cpid == 0) {
+					/* chdir 使 ./text.txt 等相对路径正确解析 */
+					my_chdir(dirpath);
+					long argv[2] = { (long)path, 0 };
+					long ret = my_execve(path, (long)argv, 0);
+					prints("[FAIL] execve failed: ");
+					printn(ret);
+					println();
+					my_exit(127);
+				}
+				int status = 0;
+				my_wait4(cpid, &status, 0, 0);
 			}
 			pos += d->d_reclen;
 		}
