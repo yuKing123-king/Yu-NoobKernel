@@ -185,7 +185,7 @@ static void my_shutdown(void)
 }
 static long heap_end = 0;
 
-#define MAX_GROUPS 16
+#define MAX_GROUPS 32
 #define MAX_NAME    64
 
 static char groups[MAX_GROUPS][MAX_NAME];
@@ -206,6 +206,37 @@ static int extract_group(const char *name, char *out, int maxlen)
 	for (int i = 0; i < glen; i++) out[i] = name[i];
 	out[glen] = '\0';
 	return 0;
+}
+
+/* scan_dir_for_testscripts: scan a directory for *_testcode.sh,
+ * add each parent dir to groups[] as the group name */
+static void scan_dir_for_scripts(const char *dirpath)
+{
+	int fd = my_openat(-100, dirpath, O_RDONLY | O_DIRECTORY);
+	if (fd < 0) return;
+
+	char buf[4096];
+	long nread;
+	while ((nread = my_getdents64(fd, buf, sizeof(buf))) > 0) {
+		int pos = 0;
+		while (pos < (int)nread) {
+			struct linux_dirent64 *d =
+			    (struct linux_dirent64 *)(buf + pos);
+			if (d->d_reclen == 0) break;
+			char *name = d->d_name;
+			if (name[0] == '.' && (name[1] == '\0' ||
+			    (name[1] == '.' && name[2] == '\0'))) {
+				pos += d->d_reclen;
+				continue;
+			}
+			if (is_test_script(name) && group_count < MAX_GROUPS) {
+				my_strcpy(groups[group_count], dirpath);
+				group_count++;
+			}
+			pos += d->d_reclen;
+		}
+	}
+	my_close(fd);
 }
 
 static int is_elf_path(const char *path)
@@ -296,71 +327,125 @@ void _start(void)
 	prints("#### OS COMP TEST START ####");
 	println();
 
-	/* 第一次扫描根目录：收集 testcode 脚本组名 */
-	int fd = my_openat(-100, "/", O_RDONLY | O_DIRECTORY);
-	if (fd < 0) { my_exit(1); }
+	/* 第1遍：扫描根目录下的 *_testcode.sh（兼容旧格式 fs.img）*/
+	{
+		int fd = my_openat(-100, "/", O_RDONLY | O_DIRECTORY);
+		if (fd < 0) { my_exit(1); }
 
-	char buf[4096];
-	long nread;
-	while ((nread = my_getdents64(fd, buf, sizeof(buf))) > 0) {
-		int pos = 0;
-		while (pos < (int)nread) {
-			struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + pos);
-			if (d->d_reclen == 0) break;
-			char *name = d->d_name;
-			if (name[0] == '.' && (name[1] == '\0' ||
-			    (name[1] == '.' && name[2] == '\0'))) {
+		char buf[4096];
+		long nread;
+		while ((nread = my_getdents64(fd, buf, sizeof(buf))) > 0) {
+			int pos = 0;
+			while (pos < (int)nread) {
+				struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + pos);
+				if (d->d_reclen == 0) break;
+				char *name = d->d_name;
+				if (name[0] == '.' && (name[1] == '\0' ||
+				    (name[1] == '.' && name[2] == '\0'))) {
+					pos += d->d_reclen;
+					continue;
+				}
+				if (is_test_script(name) && group_count < MAX_GROUPS) {
+					extract_group(name, groups[group_count], MAX_NAME);
+					group_count++;
+				}
 				pos += d->d_reclen;
-				continue;
 			}
-			if (is_test_script(name) && group_count < MAX_GROUPS) {
-				extract_group(name, groups[group_count], MAX_NAME);
-				group_count++;
+		}
+		my_close(fd);
+	}
+
+	/* 第2遍：扫描根下一级子目录里的 *_testcode.sh（评测机 sdcard-rv.img 格式）
+	   例如 /musl/basic_testcode.sh → group = "/musl/" */
+	{
+		int fd = my_openat(-100, "/", O_RDONLY | O_DIRECTORY);
+		if (fd >= 0) {
+			char buf[4096];
+			long nread;
+			while ((nread = my_getdents64(fd, buf, sizeof(buf))) > 0) {
+				int pos = 0;
+				while (pos < (int)nread) {
+					struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + pos);
+					if (d->d_reclen == 0) break;
+					char *name = d->d_name;
+					if (name[0] == '.' && (name[1] == '\0' ||
+					    (name[1] == '.' && name[2] == '\0'))) {
+						pos += d->d_reclen;
+						continue;
+					}
+					if (d->d_type == DT_DIR  /* 4 = DT_DIR */) {
+						char subpath[256];
+						my_strcpy(subpath, "/");
+						my_strcat(subpath, name);
+						my_strcat(subpath, "/");
+						scan_dir_for_scripts(subpath);
+					}
+					pos += d->d_reclen;
+				}
 			}
-			pos += d->d_reclen;
+			my_close(fd);
 		}
 	}
-	my_close(fd);
 
-	/* 对每个组：输出 markers，进入子目录运行 ELF */
+	/* 处理所有找到的组 */
 	for (int g = 0; g < group_count; g++) {
-		if (is_shell_needed(groups[g])) {
+		char *group = groups[g];
+		int is_subdir = (group[0] == '/');
+
+		if (!is_subdir && is_shell_needed(group)) {
 			/* 跳过需要 shell 的组，仅输出 markers */
 			prints("#### OS COMP TEST GROUP START ");
-			prints(groups[g]);
+			prints(group);
 			prints(" ####");
 			println();
 			prints("#### OS COMP TEST GROUP END ");
-			prints(groups[g]);
+			prints(group);
 			prints(" ####");
 			println();
 			continue;
 		}
 
 		char dirpath[256];
-		my_strcpy(dirpath, "/");
-		my_strcat(dirpath, groups[g]);
-		my_strcat(dirpath, "/");
+		if (is_subdir) {
+			my_strcpy(dirpath, group);
+		} else {
+			my_strcpy(dirpath, "/");
+			my_strcat(dirpath, group);
+			my_strcat(dirpath, "/");
+		}
 
-		/* 检查子目录是否存在 */
-		int test_fd = my_openat(-100, dirpath, O_RDONLY | O_DIRECTORY);
-		if (test_fd < 0) continue;
-		my_close(test_fd);
-
+		/* 输出 group marker */
 		prints("#### OS COMP TEST GROUP START ");
-		prints(groups[g]);
+		if (is_subdir) {
+			/* strip leading "/" and trailing "/" for display */
+			char disp[64], *s = group + 1;
+			int di = 0;
+			while (*s && *s != '/') disp[di++] = *s++;
+			disp[di] = '\0';
+			prints(disp);
+		} else {
+			prints(group);
+		}
 		prints(" ####");
 		println();
 
 		run_elfs_in_dir(dirpath);
 
 		prints("#### OS COMP TEST GROUP END ");
-		prints(groups[g]);
+		if (is_subdir) {
+			char disp[64], *s = group + 1;
+			int di = 0;
+			while (*s && *s != '/') disp[di++] = *s++;
+			disp[di] = '\0';
+			prints(disp);
+		} else {
+			prints(group);
+		}
 		prints(" ####");
 		println();
 	}
 
-	/* 也运行根目录下的 ELF（兼容旧格式 fs.img）*/
+	/* 根目录下的 ELF（兼容无 testcode 脚本的旧格式）*/
 	run_elfs_in_dir("/");
 
 	prints("#### OS COMP TEST END ####");
