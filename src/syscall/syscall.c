@@ -616,6 +616,19 @@ uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 		return -ENOEXEC;
 	}
 
+	/* 检查是否动态链接（PT_INTERP=3），不支持动态链接 */
+	for (int i = 0; i < ehdr.e_phnum; i++) {
+		elf64_phdr_t phdr;
+		loff_t ph_pos = ehdr.e_phoff + i * ehdr.e_phentsize;
+		file_lseek(f, ph_pos, SEEK_SET);
+		if (file_read(f, &phdr, sizeof(phdr)) < (ssize_t)sizeof(phdr))
+			continue;
+		if (phdr.p_type == 3) { /* PT_INTERP */
+			file_put(f);
+			return -ENOEXEC;
+		}
+	}
+
 	/* 释放旧的用户空间映射（保留 trampoline 和 trapframe）
 	 * 页表树遍历替代线性扫描，复杂度 O(已映射页数) */
 	uvm_free_user_pages(p->pagetable);

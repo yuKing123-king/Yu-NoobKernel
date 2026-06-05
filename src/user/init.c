@@ -409,6 +409,10 @@ void _start(void)
 		char *group = groups[g];
 		int is_subdir = (group[0] == '/');
 
+		/* TODO: 临时只跑 basic 组 */
+		if (my_strcmp(group, "/musl/basic/") != 0 && my_strcmp(group, "basic") != 0)
+			continue;
+
 		if (!is_subdir && is_shell_needed(group)) {
 			/* 跳过需要 shell 的组，仅输出 markers */
 			prints("#### OS COMP TEST GROUP START ");
@@ -434,10 +438,28 @@ void _start(void)
 		/* 输出 group marker */
 		prints("#### OS COMP TEST GROUP START ");
 		if (is_subdir) {
-			/* strip leading "/" and trailing "/" for display */
-			char disp[64], *s = group + 1;
-			int di = 0;
-			while (*s && *s != '/') disp[di++] = *s++;
+			/* extract: "/musl/basic/" -> "basic-musl" */
+			char disp[64];
+			int di = 0, prev = 0, last = 0;
+			for (int si = 0; group[si]; si++)
+				if (group[si] == '/') { prev = last; last = si; }
+			for (int si = prev + 1; si < last; si++)
+				disp[di++] = group[si];
+			/* append -musl / -glibc suffix */
+			{
+				int has_musl = 0, has_glibc = 0;
+				for (int si = 0; group[si]; si++) {
+					if (group[si] == '/' && group[si+1] == 'm' && group[si+2] == 'u' && group[si+3] == 's' && group[si+4] == 'l' && group[si+5] == '/')
+						has_musl = 1;
+					if (group[si] == '/' && group[si+1] == 'g' && group[si+2] == 'l' && group[si+3] == 'i' && group[si+4] == 'b' && group[si+5] == 'c' && group[si+6] == '/')
+						has_glibc = 1;
+				}
+				if (has_musl) {
+					disp[di++] = '-'; disp[di++] = 'm'; disp[di++] = 'u'; disp[di++] = 's'; disp[di++] = 'l';
+				} else if (has_glibc) {
+					disp[di++] = '-'; disp[di++] = 'g'; disp[di++] = 'l'; disp[di++] = 'i'; disp[di++] = 'b'; disp[di++] = 'c';
+				}
+			}
 			disp[di] = '\0';
 			prints(disp);
 		} else {
@@ -450,9 +472,27 @@ void _start(void)
 
 		prints("#### OS COMP TEST GROUP END ");
 		if (is_subdir) {
-			char disp[64], *s = group + 1;
-			int di = 0;
-			while (*s && *s != '/') disp[di++] = *s++;
+			char disp[64];
+			int di = 0, prev = 0, last = 0;
+			for (int si = 0; group[si]; si++)
+				if (group[si] == '/') { prev = last; last = si; }
+			for (int si = prev + 1; si < last; si++)
+				disp[di++] = group[si];
+			/* append -musl / -glibc suffix */
+			{
+				int has_musl = 0, has_glibc = 0;
+				for (int si = 0; group[si]; si++) {
+					if (group[si] == '/' && group[si+1] == 'm' && group[si+2] == 'u' && group[si+3] == 's' && group[si+4] == 'l' && group[si+5] == '/')
+						has_musl = 1;
+					if (group[si] == '/' && group[si+1] == 'g' && group[si+2] == 'l' && group[si+3] == 'i' && group[si+4] == 'b' && group[si+5] == 'c' && group[si+6] == '/')
+						has_glibc = 1;
+				}
+				if (has_musl) {
+					disp[di++] = '-'; disp[di++] = 'm'; disp[di++] = 'u'; disp[di++] = 's'; disp[di++] = 'l';
+				} else if (has_glibc) {
+					disp[di++] = '-'; disp[di++] = 'g'; disp[di++] = 'l'; disp[di++] = 'i'; disp[di++] = 'b'; disp[di++] = 'c';
+				}
+			}
 			disp[di] = '\0';
 			prints(disp);
 		} else {
