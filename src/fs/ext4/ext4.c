@@ -1372,11 +1372,12 @@ struct super_block *ext4_mount(struct file_system_type *fs_type,
 
 	/* Create root dentry */
 	struct dentry *root_dentry = dentry_root(sb);
-	if (!root_dentry) {
+	if (IS_ERR(root_dentry)) {
+		int err = PTR_ERR(root_dentry);
 		inode_free(root_inode);
 		ext4_put_super(sb);
 		super_free(sb);
-		return PTR(-ENOMEM);
+		return PTR(err);
 	}
 	root_dentry->d_inode = root_inode;
 	sb->s_root = root_dentry;
@@ -1387,6 +1388,10 @@ struct super_block *ext4_mount(struct file_system_type *fs_type,
 void ext4_kill_sb(struct super_block *sb)
 {
 	ext4_put_super(sb);
+	if (sb->s_root) {
+		dentry_free(sb->s_root);
+		sb->s_root = NULL;
+	}
 }
 
 /* Filesystem type registration */

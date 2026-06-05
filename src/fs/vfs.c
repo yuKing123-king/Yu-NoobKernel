@@ -163,13 +163,11 @@ int vfs_umount(struct super_block *sb)
 		return -EINVAL;
 	}
 
-	spinlock_acquire(&vfs_state.lock);
-	list_del(&sb->s_list);
-	spinlock_release(&vfs_state.lock);
-
 	if (sb->s_type && sb->s_type->kill_sb) {
 		sb->s_type->kill_sb(sb);
 	}
+
+	super_free(sb);
 
 	return 0;
 }
