@@ -624,7 +624,23 @@ static void ext4_destroy_inode(struct inode *inode)
 
 static int ext4_write_inode(struct inode *inode)
 {
-	/* Read-only — no write support */
+	if (!inode || !inode->i_private)
+		return -EINVAL;
+
+	struct ext4_inode *raw = (struct ext4_inode *)inode->i_private;
+	struct ext4_sb_info *sbi = ext4_get_sbi(inode->i_sb);
+	u32 block_size = sbi->block_size;
+
+	u32 bg_idx = (inode->i_ino - 1) / sbi->inodes_per_group;
+	u32 bg_ino_idx = (inode->i_ino - 1) % sbi->inodes_per_group;
+	struct ext4_group_desc bgd;
+	if (ext4_read_group_desc(sbi, bg_idx, &bgd) < 0)
+		return -EIO;
+
+	u64 inode_table_off = (u64)bgd.bg_inode_table_lo * block_size;
+	u64 inode_off = inode_table_off + (u64)bg_ino_idx * sbi->inode_size;
+
+	ext4_write_at(sbi->dev, inode_off, raw, sizeof(*raw));
 	return 0;
 }
 
@@ -657,6 +673,8 @@ static int ext4_statfs(struct super_block *sb)
 static struct dentry *ext4_lookup(struct inode *dir, struct dentry *dentry);
 static ssize_t ext4_read_file(struct file *file, void *buf,
 			      size_t count, loff_t *pos);
+static ssize_t ext4_write_file(struct file *file, const void *buf,
+			       size_t count, loff_t *pos);
 static int ext4_readdir(struct file *file, struct dirent *dirent_buf,
 			   size_t count);
 static loff_t ext4_llseek(struct file *file, loff_t offset, int whence);
@@ -681,6 +699,7 @@ struct inode_operations ext4_dir_inode_ops = {
 
 struct file_operations ext4_file_operations = {
 	.read   = ext4_read_file,
+	.write  = ext4_write_file,
 	.llseek = ext4_llseek,
 };
 
@@ -755,6 +774,94 @@ static ssize_t ext4_read_file(struct file *file, void *buf,
 		*pos += ret;
 
 	return ret;
+}
+
+/* file_operations: write */
+static ssize_t ext4_write_file(struct file *file, const void *buf,
+			       size_t count, loff_t *pos)
+{
+	struct inode *inode = file->f_inode;
+	if (!inode || !inode->i_private)
+		return -EIO;
+
+	struct ext4_inode *raw = (struct ext4_inode *)inode->i_private;
+	struct super_block *sb = inode->i_sb;
+	struct ext4_sb_info *sbi = ext4_get_sbi(sb);
+	u32 block_size = sbi->block_size;
+	u32 block_bits = sbi->sb.s_log_block_size + 10;
+
+	loff_t p = *pos;
+	const u8 *src = (const u8 *)buf;
+	ssize_t total = 0;
+	u8 *tmp = kzalloc(block_size);
+	if (!tmp)
+		return -ENOMEM;
+
+	while (count > 0) {
+		u32 lb = p >> block_bits;
+		u32 off = p & (block_size - 1);
+		u32 n = block_size - off;
+		if (n > count)
+			n = count;
+
+		/* Only direct blocks supported */
+		if (lb >= EXT4_DIRECT_BLOCKS) {
+			errorf("ext4_write_file: indirect blocks not supported");
+			total = total > 0 ? total : -ENOSPC;
+			break;
+		}
+
+		u32 pb = raw->i_block[lb];
+		if (pb == 0) {
+			pb = ext4_alloc_block(sb);
+			if (pb == 0) {
+				errorf("ext4_write_file: no free blocks");
+				total = total > 0 ? total : -ENOSPC;
+				break;
+			}
+			raw->i_block[lb] = pb;
+		}
+
+		/* Write the block (whole or partial) */
+		u64 byte_off = (u64)pb * block_size;
+		if (off == 0 && n == block_size) {
+			ext4_write_at(sbi->dev, byte_off, src, block_size);
+		} else {
+			ext4_read_at(sbi->dev, byte_off, tmp, block_size);
+			memcpy(tmp + off, src, n);
+			ext4_write_at(sbi->dev, byte_off, tmp, block_size);
+		}
+
+		total += n;
+		p += n;
+		src += n;
+		count -= n;
+	}
+
+	kfree(tmp);
+
+	if (total > 0) {
+		*pos += total;
+
+		/* Update inode size */
+		if (p > inode->i_size) {
+			inode->i_size = p;
+			raw->i_size_lo = (u32)(p & 0xFFFFFFFF);
+			raw->i_size_high = (u32)(p >> 32);
+		}
+
+		/* Update block count (in 512-byte sectors) */
+		u32 alloc_blocks = 0;
+		for (int i = 0; i < EXT4_DIRECT_BLOCKS; i++) {
+			if (raw->i_block[i] != 0)
+				alloc_blocks++;
+		}
+		raw->i_blocks_lo = alloc_blocks * (block_size / 512);
+
+		inode_dirty(inode);
+	}
+
+	return total;
 }
 
 /* file_operations: llseek */
