@@ -27,6 +27,10 @@
 extern pagetable_t kpagetable;
 
 #define AT_REMOVEDIR 0x200
+
+#define PROT_READ	1
+#define PROT_WRITE	2
+#define PROT_EXEC	4
 extern char trampoline[];
 
 /* ============================================================
@@ -737,7 +741,7 @@ uintptr_t sys_wait4(uintptr_t pid_arg, uintptr_t wstatus, uintptr_t options, uin
 			if (target == -1 || target == child->pid) {
 				if (child->state == PROC_ZOMBIE) {
 					if (wstatus != 0) {
-						int status = child->exit_code;
+						int status = (child->exit_code & 0xff) << 8;
 						if (copyout(p->pagetable, wstatus, (char *)&status,
 							    sizeof(status)) < 0) {
 							spinlock_release(&p->lock);
@@ -838,17 +842,15 @@ uintptr_t sys_mmap(uintptr_t addr, size_t len, int prot, int flags, int fd, loff
 {
 	struct proc *p = curproc();
 
-	/* 简化实现：只支持匿名映射 */
-	if (fd >= 0)
-		goto fail;
-	/* 非匿名映射需要有效 fd */
-	if (!(flags & 0x20 /* MAP_ANONYMOUS */))
-		goto fail;
 	if (len == 0)
 		goto fail;
 
-	(void)prot;
-	(void)offset;
+	int pte_flags = PTE_U;
+	if (prot & PROT_READ) pte_flags |= PTE_R;
+	if (prot & PROT_WRITE) pte_flags |= PTE_W;
+	if (prot & PROT_EXEC) pte_flags |= PTE_X;
+	if (pte_flags == PTE_U)
+		pte_flags = PTE_R | PTE_W | PTE_U;
 
 	size_t sz = PAGE_ALIGN_UP(len);
 	uintptr_t start;
@@ -856,27 +858,64 @@ uintptr_t sys_mmap(uintptr_t addr, size_t len, int prot, int flags, int fd, loff
 	if (flags & 0x20 /* MAP_FIXED */) {
 		start = addr;
 	} else {
-		/* 从 brk_end 之后分配，或默认起始地址 */
 		start = PAGE_ALIGN_UP(p->brk_end ? p->brk_end : 0x10000);
 	}
 
+	/* File-backed mmap */
+	if (fd >= 0) {
+		struct file *f = fd_get(p->fd_table, fd);
+		if (!f)
+			goto fail;
+
+		loff_t saved_pos = f->f_pos;
+		f->f_pos = offset;
+
+		for (uintptr_t a = start; a < start + sz; a += PAGE_SIZE) {
+			if (walkaddr(p->pagetable, a) != 0)
+				continue;
+			uintptr_t pa = (uintptr_t)kzalloc(PAGE_SIZE);
+			if (!pa) {
+				f->f_pos = saved_pos;
+				file_put(f);
+				return -ENOMEM;
+			}
+			if (mappages(p->pagetable, a, pa, 1, pte_flags) != 0) {
+				kfree((void *)pa);
+				f->f_pos = saved_pos;
+				file_put(f);
+				return -ENOMEM;
+			}
+			size_t to_read = PAGE_SIZE;
+			size_t remain = len - (a - start);
+			if (to_read > remain)
+				to_read = remain;
+			if (to_read > 0)
+				file_read(f, (void *)pa, to_read);
+		}
+
+		f->f_pos = saved_pos;
+		file_put(f);
+
+		if (start + sz > p->brk_end)
+			p->brk_end = start + sz;
+		return start;
+	}
+
+	/* Anonymous mmap */
 	for (uintptr_t a = start; a < start + sz; a += PAGE_SIZE) {
 		if (walkaddr(p->pagetable, a) != 0)
 			continue;
 		uintptr_t pa = (uintptr_t)kzalloc(PAGE_SIZE);
 		if (!pa)
 			return -ENOMEM;
-		if (mappages(p->pagetable, a, pa, 1,
-			     PTE_R | PTE_W | PTE_U) != 0) {
+		if (mappages(p->pagetable, a, pa, 1, pte_flags) != 0) {
 			kfree((void *)pa);
 			return -ENOMEM;
 		}
 	}
 
-	/* 更新 brk_end */
 	if (start + sz > p->brk_end)
 		p->brk_end = start + sz;
-
 	return start;
 
 fail:
@@ -1251,10 +1290,21 @@ uintptr_t sys_fstat(int fd, uintptr_t statbuf)
 		u64 st_ino;
 		u32 st_mode;
 		u32 st_nlink;
+		u32 st_uid;
+		u32 st_gid;
+		u64 st_rdev;
+		u64 __pad;
 		u64 st_size;
+		u32 st_blksize;
+		int __pad2;
+		u64 st_blocks;
 		u64 st_atime_sec;
+		u64 st_atime_nsec;
 		u64 st_mtime_sec;
+		u64 st_mtime_nsec;
 		u64 st_ctime_sec;
+		u64 st_ctime_nsec;
+		u64 __unused[2];
 	} kst;
 
 	memset(&kst, 0, sizeof(kst));
@@ -1264,10 +1314,22 @@ uintptr_t sys_fstat(int fd, uintptr_t statbuf)
 		kst.st_ino = inode->i_ino;
 		kst.st_mode = inode->i_mode;
 		kst.st_nlink = inode->i_nlink;
+		kst.st_uid = inode->i_uid;
+		kst.st_gid = inode->i_gid;
+		kst.st_rdev = inode->i_rdev;
+		kst.__pad = 0;
 		kst.st_size = inode->i_size;
+		kst.st_blksize = 1024;
+		kst.__pad2 = 0;
+		kst.st_blocks = inode->i_blocks;
 		kst.st_atime_sec = inode->i_atime;
+		kst.st_atime_nsec = 0;
 		kst.st_mtime_sec = inode->i_mtime;
+		kst.st_mtime_nsec = 0;
 		kst.st_ctime_sec = inode->i_ctime;
+		kst.st_ctime_nsec = 0;
+		kst.__unused[0] = 0;
+		kst.__unused[1] = 0;
 	}
 
 	if (copyout(p->pagetable, statbuf, (char *)&kst, sizeof(kst)) < 0) {
@@ -1308,10 +1370,21 @@ uintptr_t sys_fstatat(uintptr_t dirfd, uintptr_t pathname, uintptr_t statbuf,
 		u64 st_ino;
 		u32 st_mode;
 		u32 st_nlink;
+		u32 st_uid;
+		u32 st_gid;
+		u64 st_rdev;
+		u64 __pad;
 		u64 st_size;
+		u32 st_blksize;
+		int __pad2;
+		u64 st_blocks;
 		u64 st_atime_sec;
+		u64 st_atime_nsec;
 		u64 st_mtime_sec;
+		u64 st_mtime_nsec;
 		u64 st_ctime_sec;
+		u64 st_ctime_nsec;
+		u64 __unused[2];
 	} kst;
 
 	memset(&kst, 0, sizeof(kst));
@@ -1319,10 +1392,22 @@ uintptr_t sys_fstatat(uintptr_t dirfd, uintptr_t pathname, uintptr_t statbuf,
 	kst.st_ino = inode->i_ino;
 	kst.st_mode = inode->i_mode;
 	kst.st_nlink = inode->i_nlink;
+	kst.st_uid = inode->i_uid;
+	kst.st_gid = inode->i_gid;
+	kst.st_rdev = inode->i_rdev;
+	kst.__pad = 0;
 	kst.st_size = inode->i_size;
+	kst.st_blksize = 1024;
+	kst.__pad2 = 0;
+	kst.st_blocks = inode->i_blocks;
 	kst.st_atime_sec = inode->i_atime;
+	kst.st_atime_nsec = 0;
 	kst.st_mtime_sec = inode->i_mtime;
+	kst.st_mtime_nsec = 0;
 	kst.st_ctime_sec = inode->i_ctime;
+	kst.st_ctime_nsec = 0;
+	kst.__unused[0] = 0;
+	kst.__unused[1] = 0;
 
 	dentry_put(d);
 
