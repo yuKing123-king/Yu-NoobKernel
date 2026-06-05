@@ -262,6 +262,7 @@ static int is_shell_needed(const char *name)
 {
 	if (my_strcmp(name, "busybox") == 0 ||
 	    my_strcmp(name, "lua") == 0 ||
+	    my_strcmp(name, "mount") == 0 ||
 	    my_strcmp(name, "libctest") == 0 ||
 	    my_strcmp(name, "unixbench") == 0 ||
 	    my_strcmp(name, "iozone") == 0 ||
