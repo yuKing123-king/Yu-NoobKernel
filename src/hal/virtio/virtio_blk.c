@@ -109,7 +109,8 @@ static int virtio_blk_rw_internal(struct block_device *dev, u64 sector,
 
 	virtq_kick(vq);
 
-	uint64_t deadline = r_time() + sec_to_cputime(5);
+	uint64_t deadline = r_time() + sec_to_cputime(2);
+	uint64_t spin = 0;
 	while (!req->completed) {
 		if (virtq_has_buf(vq)) {
 			u32 len;
@@ -122,6 +123,12 @@ static int virtio_blk_rw_internal(struct block_device *dev, u64 sector,
 		if (r_time() > deadline) {
 			errorf("virtio_blk_rw: timeout, sector=%llu, nsectors=%u",
 			       sector, nsectors);
+			kfree(req);
+			return -1;
+		}
+		if (++spin > 50000000) {
+			errorf("virtio_blk_rw: spin timeout, sector=%llu",
+			       sector);
 			kfree(req);
 			return -1;
 		}

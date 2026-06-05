@@ -216,6 +216,12 @@ int virtio_setup_vq(struct virtio_device *dev, u32 vq_idx, u16 num)
 	uintptr_t desc_pa = (uintptr_t)vq->descs;
 
 	if (dev->version == 1) {
+		/* QEMU 10.0.2 requires VIRTIO_MMIO_GUEST_PAGE_SIZE to be
+		 * explicitly set; the reset default for guest_page_shift is
+		 * 0, so QUEUE_PFN = addr >> 0 = addr (wrong!) instead of
+		 * addr >> 12.  Older QEMU (8.x) defaulted to 12. */
+		virtio_write_reg(dev, 0x028, PAGE_SIZE);
+		mb();
 		virtio_write_reg(dev, VIRTIO_REG_QUEUE_ALIGN, PAGE_SIZE);
 		mb();
 		virtio_write_reg(dev, VIRTIO_REG_QUEUE_PFN, desc_pa / PAGE_SIZE);

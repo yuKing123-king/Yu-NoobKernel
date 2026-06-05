@@ -56,6 +56,10 @@ struct virtq *virtq_create(struct virtio_mmio_regs *regs, u16 queue_idx,
 	uintptr_t pa = va2pa(mem);
 	vq->descs = (struct virtq_desc *)mem;
 
+	/* QEMU legacy formula: avail = desc + num*sizeof(desc), no align.
+	 * used = ALIGN_UP(avail + avail_ring_size, VRING_ALIGN).
+	 * Modern mode uses explicit addresses per ring register.
+	 * vring_size() includes VRING_ALIGN*2 padding so both fit. */
 	size_t avail_offset = sizeof(struct virtq_desc) * num;
 	vq->avail = (struct virtq_avail *)((uintptr_t)mem + avail_offset);
 
