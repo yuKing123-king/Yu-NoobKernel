@@ -149,7 +149,7 @@ static struct proc *create_init_process(void)
 	/* 计算 init 程序大小并分配用户内存 */
 	uintptr_t init_size = (uintptr_t)_binary_z_end -
 			      (uintptr_t)_binary_z_start;
-	uintptr_t mem_sz = PAGE_ALIGN_UP(init_size);
+	uintptr_t mem_sz = PAGE_ALIGN_UP(init_size) + PAGE_SIZE;
 
 	uintptr_t alloc_sz = uvmalloc(p->pagetable, 0, mem_sz);
 	if (alloc_sz == 0)
