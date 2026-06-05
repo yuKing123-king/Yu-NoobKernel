@@ -10,5 +10,5 @@ compile_commands.json
 outdated
 kernel-rv
 kernel-la
-disk.img
-fs.img
+test_output_*.log
+*.img
