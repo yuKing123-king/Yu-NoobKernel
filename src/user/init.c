@@ -229,10 +229,18 @@ static void scan_dir_for_scripts(const char *dirpath)
 				pos += d->d_reclen;
 				continue;
 			}
-			if (is_test_script(name) && group_count < MAX_GROUPS) {
-				my_strcpy(groups[group_count], dirpath);
-				group_count++;
-			}
+	if (is_test_script(name) && group_count < MAX_GROUPS) {
+		char subdir[256];
+		int nlen = my_strlen(name) - 12;
+		my_strcpy(subdir, dirpath);
+		int dlen = my_strlen(subdir);
+		for (int j = 0; j < nlen; j++)
+			subdir[dlen + j] = name[j];
+		subdir[dlen + nlen] = '/';
+		subdir[dlen + nlen + 1] = '\0';
+		my_strcpy(groups[group_count], subdir);
+		group_count++;
+	}
 			pos += d->d_reclen;
 		}
 	}

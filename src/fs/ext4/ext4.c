@@ -1294,12 +1294,12 @@ static int ext4_readdir(struct file *file, struct dirent *dirent_buf,
 	u8 *buf = kzalloc(dir_size < 4096 ? 4096 : dir_size);
 	if (!buf)
 		return -ENOMEM;
-
 	ssize_t ret = ext4_read_data(sb, raw, 0, buf, dir_size);
 	if (ret < 0) {
 		kfree(buf);
 		return ret;
 	}
+
 
 	size_t written = 0;
 	u64 off = (u64)pos;
