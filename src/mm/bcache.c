@@ -80,18 +80,28 @@ static struct buf *bcache_lookup(dev_t dev, u64 blockno)
  */
 static struct buf *bcache_evict(void)
 {
-	struct buf *b;
+	struct buf *b, *dirty_b = NULL;
 	list_for_each_entry_reverse(b, &bcache.lru_list, lru)
 	{
 		if (b->refcnt == 0) {
-			if (b->dirty) {
-				blk_write(b->dev, b->blockno, b->data, 1);
-				b->dirty = false;
+			if (!b->dirty) {
+				list_del(&b->hash);
+				b->valid = false;
+				return b;
 			}
-			list_del(&b->hash);
-			b->valid = false;
-			return b;
+			if (!dirty_b)
+				dirty_b = b;
 		}
+	}
+	if (dirty_b) {
+		/* 释放 bcache.lock 后再写脏块，避免关中断做 I/O */
+		list_del(&dirty_b->hash);
+		dirty_b->valid = false;
+		spinlock_release(&bcache.lock);
+		blk_write(dirty_b->dev, dirty_b->blockno, dirty_b->data, 1);
+		spinlock_acquire(&bcache.lock);
+		dirty_b->dirty = false;
+		return dirty_b;
 	}
 	return NULL;
 }
@@ -137,7 +147,10 @@ struct buf *bread(dev_t dev, u64 blockno)
 	struct buf *b = bcache_get(dev, blockno);
 
 	if (!b->valid) {
+		/* 释放 b->lock 再做 I/O，避免关中断自旋等 virtio 完成 */
+		spinlock_release(&b->lock);
 		blk_read(dev, blockno, b->data, 1);
+		spinlock_acquire(&b->lock);
 		b->valid = true;
 	}
 
@@ -152,8 +165,10 @@ void bwrite(struct buf *b)
 	}
 
 	b->dirty = true;
+	spinlock_release(&b->lock);
 	blk_write(b->dev, b->blockno, b->data, 1);
 	b->dirty = false;
+	spinlock_acquire(&b->lock);
 }
 
 void brelse(struct buf *b)

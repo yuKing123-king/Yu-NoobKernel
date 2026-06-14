@@ -250,11 +250,19 @@ int dentry_insert(struct dentry *dentry)
 
 	u32 key =
 	    dentry_hash_key(dentry->d_sb, dentry->d_parent, &dentry->d_name);
-	struct dentry *existing =
-	    hashtable_lookup(&dentry_state.ht, (void *)(uintptr_t)key);
-	if (existing) {
-		spinlock_release(&dentry_state.lock);
-		return -EEXIST;
+	/* 遍历哈希桶内链表做完整比较，避免桶索引碰撞误判为 EEXIST */
+	u32 bucket_idx = hash_ptr((void *)(uintptr_t)key, dentry_state.ht.size);
+	struct hash_node *node;
+	list_for_each_entry(node, &dentry_state.ht.buckets[bucket_idx], list)
+	{
+		struct dentry *existing = (struct dentry *)node->value;
+		if (existing && existing->d_sb == dentry->d_sb &&
+		    existing->d_parent == dentry->d_parent &&
+		    existing->d_name.len == dentry->d_name.len &&
+		    strcmp(existing->d_name.name, dentry->d_name.name) == 0) {
+			spinlock_release(&dentry_state.lock);
+			return -EEXIST;
+		}
 	}
 
 	hashtable_insert(&dentry_state.ht, (void *)(uintptr_t)key, dentry);

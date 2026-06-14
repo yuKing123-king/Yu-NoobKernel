@@ -256,9 +256,6 @@ bool virtq_has_buf(struct virtq *vq)
 void virtq_kick(struct virtq *vq)
 {
 	mb();
-	if (vq->avail->flags & 1) {
-		return;
-	}
 	mmio_write32(&vq->regs->queue_notify, vq->queue_idx);
 }
 

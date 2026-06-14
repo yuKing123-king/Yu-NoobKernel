@@ -551,25 +551,6 @@ struct file *vfs_open_cwd(const char *path, u32 flags, struct dentry *base)
 				dentry_put(parent.dentry);
 				return PTR(-ENOENT);
 			}
-			if (!parent.dentry->d_inode) {
-				kfree(last.name);
-				dentry_put(parent.dentry);
-				return PTR(-ENOENT);
-			}
-
-			tracef("parent.dentry: %p", parent.dentry);
-			if (!parent.dentry) {
-				kfree(last.name);
-				return PTR(-ENOENT);
-			}
-
-			tracef("parent.dentry->d_inode: %p",
-			      parent.dentry->d_inode);
-			if (!parent.dentry->d_inode) {
-				kfree(last.name);
-				dentry_put(parent.dentry);
-				return PTR(-ENOENT);
-			}
 
 			if (!S_ISDIR(parent.dentry->d_inode->i_mode)) {
 				kfree(last.name);

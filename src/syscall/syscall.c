@@ -234,7 +234,10 @@ uintptr_t sys_openat(uintptr_t dirfd, uintptr_t pathname, uintptr_t flags, uintp
 		else
 			base = p->pwd;
 	}
-	struct file *f = vfs_open_cwd(path, (u32)flags, base);
+	/* Normalize O_CREATE(0x40) → O_CREAT(0x100) for all callers */
+	u32 norm_flags = (u32)flags;
+	if (norm_flags & 0x40) norm_flags |= O_CREAT;
+	struct file *f = vfs_open_cwd(path, norm_flags, base);
 	if (IS_ERR(f)) {
 		return (uintptr_t)PTR_ERR(f);
 	}

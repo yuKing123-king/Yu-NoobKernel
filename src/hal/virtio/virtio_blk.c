@@ -126,7 +126,10 @@ static int virtio_blk_rw_internal(struct block_device *dev, u64 sector,
 			kfree(req);
 			return -1;
 		}
-		if (++spin > 50000000) {
+		if ((++spin & 255) == 0) {
+			virtq_kick(vq);
+		}
+		if (spin > 50000000) {
 			errorf("virtio_blk_rw: spin timeout, sector=%llu",
 			       sector);
 			kfree(req);

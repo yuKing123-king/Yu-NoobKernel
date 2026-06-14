@@ -1287,11 +1287,13 @@ static int ext4_readdir(struct file *file, struct dirent *dirent_buf,
 	u64 dir_size = inode->i_size;
 	loff_t pos   = file->f_pos;
 
-	if (pos >= (loff_t)dir_size)
+	/* 限制最大读取到 block_size，防止 inode->i_size 被内存操作撑大 */
+	u64 limit = dir_size < (u64)sbi->block_size ? dir_size : (u64)sbi->block_size;
+	if (pos >= (loff_t)limit)
 		return 0;
 
-	/* Read the directory data */
-	u8 *buf = kzalloc(dir_size < 4096 ? 4096 : dir_size);
+	/* 读目录内容 */
+	u8 *buf = kzalloc(limit < 4096 ? 4096 : limit);
 	if (!buf)
 		return -ENOMEM;
 	ssize_t ret = ext4_read_data(sb, raw, 0, buf, dir_size);
@@ -1304,7 +1306,7 @@ static int ext4_readdir(struct file *file, struct dirent *dirent_buf,
 	size_t written = 0;
 	u64 off = (u64)pos;
 
-	while (off < dir_size && written + sizeof(struct dirent) <= count) {
+	while (off < limit && written + sizeof(struct dirent) <= count) {
 		struct ext4_dirent *de = (struct ext4_dirent *)(buf + off);
 		if (de->inode == 0 || de->rec_len == 0)
 			break;

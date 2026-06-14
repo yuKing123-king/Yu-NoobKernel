@@ -352,11 +352,7 @@ ssize_t file_getdents(struct file *file, struct dirent *buf, size_t count)
 		return -ENOSYS;
 	}
 
-	spinlock_acquire(&file->f_lock);
-
 	int ret = file->f_op->readdir(file, buf, count);
-
-	spinlock_release(&file->f_lock);
 
 	return ret;
 }

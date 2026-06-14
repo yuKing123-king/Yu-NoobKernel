@@ -32,7 +32,7 @@
 #define PID_MAX INT32_MAX
 
 #define BLOCK_SIZE 512
-#define BCACHE_SIZE 128
-#define BCACHE_HASH_SIZE 17
+#define BCACHE_SIZE 512
+#define BCACHE_HASH_SIZE 64
 
 #define VIRTQ_SIZE 32

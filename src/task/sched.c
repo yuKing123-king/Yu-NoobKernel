@@ -33,9 +33,12 @@ bool is_runq_empty(int hartid) { return list_empty(&runq[hartid].queue); }
  */
 void enqueue_proc(int hartid, struct proc *p)
 {
+	u64 flags = r_sstatus();
+	w_sstatus(flags & ~SSTATUS_SIE);
 	spinlock_acquire(&runq[hartid].lock);
 	list_add_tail(&p->runq, &runq[hartid].queue);
 	spinlock_release(&runq[hartid].lock);
+	w_sstatus(flags);
 }
 
 /*
@@ -48,10 +51,13 @@ struct proc *dequeue_proc(int hartid)
 	if (is_runq_empty(hartid)) {
 		return NULL;
 	}
+	u64 flags = r_sstatus();
+	w_sstatus(flags & ~SSTATUS_SIE);
 	spinlock_acquire(&runq[hartid].lock);
 	struct list_head *lh = runq[hartid].queue.next;
 	list_del(lh);
 	spinlock_release(&runq[hartid].lock);
+	w_sstatus(flags);
 	return container_of(lh, struct proc, runq);
 }
 
@@ -62,6 +68,10 @@ void sched_yield()
 {
 	struct cpu *c = thiscpu();
 	struct proc *p = c->proc;
+
+	u64 saved_sstatus = r_sstatus();
+	w_sstatus(saved_sstatus & ~SSTATUS_SIE);
+
 	if (p) {
 		switch (p->state) {
 		case PROC_RUNNING:
@@ -77,6 +87,8 @@ void sched_yield()
 	thiscpu()->proc = NULL;
 	thiscpu()->need_resched = false;
 	context_switch_yield(p);
+
+	w_sstatus(saved_sstatus);
 }
 
 /*
@@ -90,6 +102,13 @@ void context_switch_yield(struct proc *old)
 
 	next = dequeue_proc(r_tp());
 	if (!next) {
+		/* 运行队列为空：如果 old 还活着就恢复它，否则走 idle */
+		if (old && old->state != PROC_ZOMBIE &&
+		    old->state != PROC_SLEEPING && old != &c->idle) {
+			old->state = PROC_RUNNING;
+			c->proc = old;
+			return;
+		}
 		next = &c->idle;
 	}
 

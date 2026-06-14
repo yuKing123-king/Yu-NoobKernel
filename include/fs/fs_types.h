@@ -50,6 +50,7 @@ typedef u64 time_t;
 #define O_RDWR 00000002
 #define O_ACCMODE 00000003
 #define O_CREAT 00000100
+#define O_CREATE 00000100
 #define O_EXCL 00000200
 #define O_NOCTTY 00000400
 #define O_TRUNC 00001000
