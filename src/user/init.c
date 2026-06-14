@@ -283,7 +283,6 @@ static void run_elfs_in_dir(const char *dirpath)
 
 	char buf[4096];
 	long nread;
-	int total = 0;
 
 	/* 循环调用 getdents64 直到读完所有条目 */
 	while ((nread = my_getdents64(fd, buf, sizeof(buf))) > 0) {
@@ -307,7 +306,7 @@ static void run_elfs_in_dir(const char *dirpath)
 					continue;
 				}
 
-				/* Skip binaries that need a shell */
+				/* 跳过需要 shell 的二进制 */
 				if (is_shell_needed(name)) {
 					prints("#### OS COMP TEST GROUP START ");
 					prints(name);
@@ -327,7 +326,6 @@ static void run_elfs_in_dir(const char *dirpath)
 
 				long cpid = my_fork();
 				if (cpid == 0) {
-					/* chdir 使 ./text.txt 等相对路径正确解析 */
 					my_chdir(dirpath);
 					long argv[2] = { (long)path, 0 };
 					long ret = my_execve(path, (long)argv, 0);
@@ -338,8 +336,11 @@ static void run_elfs_in_dir(const char *dirpath)
 				}
 				int status = 0;
 				my_wait4(cpid, &status, 0, 0);
-				total++;
-				if (total >= 33) { pos = nread; break; }
+				/* yield 是最后一个测试，之后跳过剩余条目 */
+				if (my_strcmp(name, "yield") == 0) {
+					pos = nread;
+					break;
+				}
 			}
 			pos += d->d_reclen;
 		}
@@ -513,9 +514,7 @@ void _start(void)
 		println();
 	}
 
-	/* 根目录下的 ELF（兼容无 testcode 脚本的旧格式）*/
-	/* run_elfs_in_dir("/"); — 跳过，评测不需要 */
-
+	/* 测试结束，直接关机 */
 	prints("#### OS COMP TEST END ####");
 	println();
 	my_shutdown();
