@@ -1287,8 +1287,7 @@ static int ext4_readdir(struct file *file, struct dirent *dirent_buf,
 	u64 dir_size = inode->i_size;
 	loff_t pos   = file->f_pos;
 
-	/* 限制最大读取到 block_size，防止 inode->i_size 被内存操作撑大 */
-	u64 limit = dir_size < (u64)sbi->block_size ? dir_size : (u64)sbi->block_size;
+	u64 limit = dir_size;
 	if (pos >= (loff_t)limit)
 		return 0;
 
@@ -1308,8 +1307,13 @@ static int ext4_readdir(struct file *file, struct dirent *dirent_buf,
 
 	while (off < limit && written + sizeof(struct dirent) <= count) {
 		struct ext4_dirent *de = (struct ext4_dirent *)(buf + off);
-		if (de->inode == 0 || de->rec_len == 0)
+		if (de->rec_len == 0)
 			break;
+
+		if (de->inode == 0) {
+			off += de->rec_len;
+			continue;
+		}
 
 		if (de->name_len > 0) {
 			struct dirent *d =
