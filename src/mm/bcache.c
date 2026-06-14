@@ -96,6 +96,7 @@ static struct buf *bcache_evict(void)
 	if (dirty_b) {
 		/* 释放 bcache.lock 后再写脏块，避免关中断做 I/O */
 		list_del(&dirty_b->hash);
+		list_del(&dirty_b->lru);
 		dirty_b->valid = false;
 		spinlock_release(&bcache.lock);
 		blk_write(dirty_b->dev, dirty_b->blockno, dirty_b->data, 1);

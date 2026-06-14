@@ -119,5 +119,6 @@ void context_switch_yield(struct proc *old)
 	c->proc = next;
 	spinlock_release(&next->lock);
 
-	context_switch(&old->ctx, &next->ctx);
+	if (next != old)
+		context_switch(&old->ctx, &next->ctx);
 }
