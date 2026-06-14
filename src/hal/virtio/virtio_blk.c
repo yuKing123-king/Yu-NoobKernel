@@ -10,6 +10,7 @@
 #include <misc/log.h>
 #include <sync/barrier.h>
 #include <mm/kalloc.h>
+#include <trap/trap.h>
 #include <platform/qemu_virt.h>
 
 struct virtio_blk_request {
@@ -126,14 +127,19 @@ static int virtio_blk_rw_internal(struct block_device *dev, u64 sector,
 			kfree(req);
 			return -1;
 		}
-		if ((++spin & 255) == 0) {
-			virtq_kick(vq);
-		}
-		if (spin > 50000000) {
-			errorf("virtio_blk_rw: spin timeout, sector=%llu",
-			       sector);
-			kfree(req);
-			return -1;
+		if ((++spin & 1023) == 0) {
+			/*
+			 * 短暂开启中断，让 QEMU I/O 线程有机会
+			 * 处理设备请求并注入中断，
+			 * ISR 会标记 req->completed。
+			 * 单核 + 仅 init/idle，安全。
+			 */
+			intr_on();
+			for (volatile int i = 0; i < 128; i++)
+				;
+			intr_off();
+			if (req->completed)
+				break;
 		}
 	}
 
