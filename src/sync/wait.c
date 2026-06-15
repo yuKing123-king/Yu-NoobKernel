@@ -14,9 +14,9 @@ void wait_queue_sleep(struct wait_queue *wq, struct proc *p)
 {
 	spinlock_acquire(&wq->lock);
 	list_add_tail(&p->runq, &wq->list);
+	p->state = PROC_SLEEPING;
 	spinlock_release(&wq->lock);
 
-	p->state = PROC_SLEEPING;
 	sched_yield();
 }
 

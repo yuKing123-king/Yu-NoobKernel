@@ -42,7 +42,10 @@ ssize_t pipe_read(struct file *f, void *ubuf, size_t count, loff_t *pos)
 
 	(void)pos;
 
-	while (count == 0 && total == 0) {
+	if (count == 0)
+		return 0;
+
+	for (;;) {
 		spinlock_acquire(&p->lock);
 		if (p->count > 0)
 			break;
@@ -53,8 +56,6 @@ ssize_t pipe_read(struct file *f, void *ubuf, size_t count, loff_t *pos)
 		spinlock_release(&p->lock);
 		wait_queue_sleep(&p->rq, cur);
 	}
-
-	spinlock_acquire(&p->lock);
 
 	while (total < (int)count) {
 		if (p->count == 0) {
@@ -67,10 +68,7 @@ ssize_t pipe_read(struct file *f, void *ubuf, size_t count, loff_t *pos)
 		p->rd = (p->rd + 1) % PIPE_SIZE;
 		p->count--;
 
-		if (copyout(cur->pagetable, (uintptr_t)ubuf + total, &c, 1) < 0) {
-			spinlock_release(&p->lock);
-			return total > 0 ? total : -EFAULT;
-		}
+		((char *)ubuf)[total] = c;
 		total++;
 	}
 
@@ -81,7 +79,6 @@ ssize_t pipe_read(struct file *f, void *ubuf, size_t count, loff_t *pos)
 
 	return total;
 }
-
 ssize_t pipe_write(struct file *f, const void *ubuf, size_t count, loff_t *pos)
 {
 	struct pipe *p = get_pipe(f);
@@ -114,11 +111,7 @@ ssize_t pipe_write(struct file *f, const void *ubuf, size_t count, loff_t *pos)
 			}
 		}
 
-		char c;
-		if (copyin(cur->pagetable, &c, (uintptr_t)ubuf + total, 1) < 0) {
-			spinlock_release(&p->lock);
-			return total > 0 ? total : -EFAULT;
-		}
+		char c = ((const char *)ubuf)[total];
 
 		p->buf[p->wr] = c;
 		p->wr = (p->wr + 1) % PIPE_SIZE;

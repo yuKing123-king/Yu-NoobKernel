@@ -383,13 +383,14 @@ void file_put(struct file *file)
 	}
 
 	spinlock_acquire(&file->f_lock);
-	file->f_refcnt--;
-
-	if (file->f_refcnt == 0) {
-		spinlock_release(&file->f_lock);
-		file_close(file);
-		return;
-	}
-
+	bool last = (--file->f_refcnt == 0);
 	spinlock_release(&file->f_lock);
+
+	if (last) {
+		if (file->f_op && file->f_op->release)
+			file->f_op->release(file->f_inode, file);
+		if (file->f_dentry)
+			dentry_put(file->f_dentry);
+		file_free(file);
+	}
 }
