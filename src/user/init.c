@@ -422,7 +422,7 @@ void _start(void)
 		int is_subdir = (group[0] == '/');
 
 		/* TODO: 临时只跑 basic 组 */
-		if (my_strcmp(group, "/musl/basic/") != 0 && my_strcmp(group, "basic") != 0)
+		if (my_strcmp(group, "/musl/basic/") != 0 && my_strcmp(group, "/glibc/basic/") != 0 && my_strcmp(group, "basic") != 0)
 			continue;
 
 		if (!is_subdir && is_shell_needed(group)) {
