@@ -68,6 +68,12 @@ static void slab_init(struct kmem_cache *kmem, void *blob)
 	u32 bitmap_size = ALIGN_UP(total, 8) / 8;
 	u32 offset =
 	    ALIGN_UP(sizeof(struct slab) + bitmap_size, kmem->obj_size);
+	while (offset + total * kmem->alloc_size > SLAB_BLOB_SIZE) {
+		total--;
+		bitmap_size = ALIGN_UP(total, 8) / 8;
+		offset = ALIGN_UP(sizeof(struct slab) + bitmap_size,
+				  kmem->obj_size);
+	}
 	*s = (struct slab){
 	    .kmem = kmem,
 	    .total = total,
@@ -120,10 +126,8 @@ static void *slab_alloc(struct slab *s)
 	if (idx == s->bm.len)
 		panic("slab meta data error");
 	bitmap_set(&s->bm, idx);
-	slab_log(
-	    "%s allocated: %p", s->kmem->name,
-	    (void *)((uintptr_t)s + s->offset + idx * s->kmem->alloc_size));
-	return (void *)((uintptr_t)s + s->offset + idx * s->kmem->alloc_size);
+	void *mem = (void *)((uintptr_t)s + s->offset + idx * s->kmem->alloc_size);
+	return mem;
 }
 
 /*
