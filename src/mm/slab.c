@@ -150,7 +150,7 @@ static void slab_free(void *addr)
 		panic("trying free out-bounded block at %p in slab", addr);
 
 	if (bitmap_get(&s->bm, idx) == 0) {
-		warnf("double free %p in a slab", addr);
+		warnf("double free %p in slab '%s'", addr, s->kmem->name);
 		return;
 	}
 

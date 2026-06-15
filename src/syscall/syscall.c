@@ -1189,12 +1189,16 @@ uintptr_t sys_dup(uintptr_t oldfd)
 		return -EMFILE;
 	}
 
+	/* 为新的 fd 表项增加引用 */
+	file_get(f);
+
 	if (fd_install(p->fd_table, newfd, f) < 0) {
+		file_put(f);
 		file_put(f);
 		return -EBADF;
 	}
 
-	/* fd_install 增加了引用，fd_get 也增加了，需要释放 fd_get 的一次 */
+	/* 释放 fd_get 的临时引用；fd_install 持有的那一次由 fd_table_free 释放 */
 	file_put(f);
 
 	return newfd;
@@ -1244,8 +1248,10 @@ uintptr_t sys_dup3(uintptr_t oldfd, uintptr_t newfd, uintptr_t flags)
 
 	/* 关闭 newfd 上已有的文件 */
 	fd_free(p->fd_table, (int)newfd);
+	file_get(f);
 
 	if (fd_install(p->fd_table, (int)newfd, f) < 0) {
+		file_put(f);
 		file_put(f);
 		return -EBADF;
 	}
