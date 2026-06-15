@@ -229,7 +229,7 @@ void usertrapret(struct proc *p)
 	intr_off();
 
 	w_stvec(TRAMPOLINE + ((uintptr_t)uservec - (uintptr_t)trampoline));
-
+	
 	p->tf->kernel_satp = MAKE_SATP(kpagetable);
 	p->tf->kernel_sp = (uintptr_t)p->kstack + KSTACK_SIZE;
 	p->tf->kernel_trap = (uintptr_t)usertrap;

@@ -115,7 +115,7 @@ void context_switch_yield(struct proc *old)
 	spinlock_acquire(&next->lock);
 	if (next != &c->idle) {
 		next->state = PROC_RUNNING;
-	}
+			}
 	c->proc = next;
 	spinlock_release(&next->lock);
 

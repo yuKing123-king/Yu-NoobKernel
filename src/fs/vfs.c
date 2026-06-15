@@ -529,8 +529,6 @@ struct file *vfs_open_cwd(const char *path, u32 flags, struct dentry *base)
 	tracef("vfs_open_cwd: path='%s', flags=0x%x, base=%p", path, flags, base);
 
 	struct dentry *dentry = vfs_path_lookup(base, path, LOOKUP_FOLLOW);
-	tracef("vfs_path_lookup returned: %p (IS_ERR=%d)", dentry,
-	       IS_ERR(dentry));
 
 	if (IS_ERR(dentry)) {
 		if ((flags & O_CREAT) && PTR_ERR(dentry) == -ENOENT) {
