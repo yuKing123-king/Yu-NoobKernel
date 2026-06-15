@@ -37,6 +37,10 @@ TEST_BIN_DIR="${TEST_SUITE_DIR}/basic/user/build/riscv64"
 FS_IMG="${KERNEL_DIR}/fs.img"
 DISK_IMG="${KERNEL_DIR}/disk.img"
 SDCARD_IMG="${KERNEL_DIR}/sdcard-rv.img"
+SDCARD_SIZE=256
+
+# Docker 镜像（与评测机保持一致）
+DOCKER_IMAGE="${DOCKER_IMAGE:-docker.io/zhouzhouyi/os-contest:20260510}"
 
 ###############################################################################
 # 辅助函数
@@ -48,6 +52,17 @@ debugfs_write() {
     local img="$1" src="$2" dest="$3"
     debugfs -w -R "rm $dest" "$img" 2>/dev/null || true
     debugfs -w -R "write $src $dest" "$img" >/dev/null 2>&1
+}
+
+# 用 debugfs 将字符串内容写入文件（通过临时文件）
+# 用法: debugfs_write_content <镜像路径> <目标路径> <内容>
+debugfs_write_content() {
+    local img="$1" dest="$2" content="$3"
+    local tmpf=$(mktemp /tmp/debugfs.XXXXXX)
+    printf '%s\n' "$content" > "$tmpf"
+    debugfs -w -R "rm $dest" "$img" 2>/dev/null || true
+    debugfs -w -R "write $tmpf $dest" "$img" >/dev/null 2>&1
+    rm -f "$tmpf"
 }
 
 # 用 debugfs 创建目录
@@ -110,103 +125,105 @@ copy_tests_to_image() {
 
 if [ -n "$SDCARD" ]; then
     echo "========================================"
-    echo "  重新制作 sdcard-rv.img"
+    echo "  重新制作 sdcard-rv.img（评测机镜像）"
     echo "  内核: ${KERNEL_NAME}"
+    echo "  Docker: ${DOCKER_BUILD:+在 Docker 中编译}"
     echo "========================================"
 
-    # 检查测试套件
-    if [ ! -d "${TEST_BIN_DIR}" ]; then
-        echo "错误: 测试程序未找到: ${TEST_BIN_DIR}"
-        exit 1
-    fi
-
-    # 如设置 DOCKER_BUILD=1，在 Docker 中重新编译测试程序
+    # 如设置 DOCKER_BUILD=1，用 Docker 完整编译（与评测机 Makefile 一致）
     if [ -n "$DOCKER_BUILD" ]; then
         echo "在 Docker 中编译测试程序..."
-        DOCKER_IMAGE="docker.io/zhouzhouyi/os-contest:20260510"
-
-        # musl 版本
-        echo "编译 musl 版本..."
         docker run --rm \
             -v "${TEST_SUITE_DIR}:/code" \
             -w /code \
             --entrypoint bash \
             "${DOCKER_IMAGE}" \
-            -c "make -f Makefile.sub clean 2>/dev/null; \
-                make -f Makefile.sub PREFIX=riscv64-buildroot-linux-musl- DESTDIR=/code/sdcard/riscv/musl basic 2>&1; \
-                sed -E -i 's/#### OS COMP TEST GROUP ([^ ]+) ([^ ]+) ####/#### OS COMP TEST GROUP \1 \2-musl ####/g' /code/sdcard/riscv/musl/*_testcode.sh 2>/dev/null || true"
+            -c "
+                # 编译 musl 版本
+                echo '>>> 编译 musl ...'
+                make -f Makefile.sub clean 2>/dev/null
+                mkdir -p sdcard/riscv/musl
+                make -f Makefile.sub PREFIX=riscv64-buildroot-linux-musl- DESTDIR=/code/sdcard/riscv/musl basic 2>&1
+                cp /opt/riscv64--musl--bleeding-edge-2020.08-1/riscv64-buildroot-linux-musl/sysroot/lib/libc.so /code/sdcard/riscv/musl/lib/ 2>/dev/null || true
+                sed -E -i 's/#### OS COMP TEST GROUP ([^ ]+) ([^ ]+) ####/#### OS COMP TEST GROUP \1 \2-musl ####/g' /code/sdcard/riscv/musl/*_testcode.sh 2>/dev/null || true
 
-        # glibc 版本
-        echo "编译 glibc 版本..."
-        docker run --rm \
-            -v "${TEST_SUITE_DIR}:/code" \
-            -w /code \
-            --entrypoint bash \
-            "${DOCKER_IMAGE}" \
-            -c "make -f Makefile.sub clean 2>/dev/null; \
-                make -f Makefile.sub PREFIX=riscv64-linux-gnu- DESTDIR=/code/sdcard/riscv/glibc basic 2>&1; \
-                sed -E -i 's/#### OS COMP TEST GROUP ([^ ]+) ([^ ]+) ####/#### OS COMP TEST GROUP \1 \2-glibc ####/g' /code/sdcard/riscv/glibc/*_testcode.sh 2>/dev/null || true"
+                # 编译 glibc 版本
+                echo '>>> 编译 glibc ...'
+                make -f Makefile.sub clean 2>/dev/null
+                mkdir -p sdcard/riscv/glibc
+                make -f Makefile.sub PREFIX=riscv64-linux-gnu- DESTDIR=/code/sdcard/riscv/glibc basic 2>&1
+                cp /usr/riscv64-linux-gnu/lib/libc.so.6 /code/sdcard/riscv/glibc/lib/ 2>/dev/null || true
+                cp /usr/riscv64-linux-gnu/lib/libm.so.6 /code/sdcard/riscv/glibc/lib/ 2>/dev/null || true
+                cp /usr/riscv64-linux-gnu/lib/ld-linux-riscv64-lp64d.so.1 /code/sdcard/riscv/glibc/lib/ 2>/dev/null || true
+                sed -E -i 's/#### OS COMP TEST GROUP ([^ ]+) ([^ ]+) ####/#### OS COMP TEST GROUP \1 \2-glibc ####/g' /code/sdcard/riscv/glibc/*_testcode.sh 2>/dev/null || true
+            "
 
-        MUSL_BIN="${TEST_SUITE_DIR}/sdcard/riscv/musl/basic"
-        GLIBC_BIN="${TEST_SUITE_DIR}/sdcard/riscv/glibc/basic"
-        MUSL_ROOT="${TEST_SUITE_DIR}/sdcard/riscv/musl"
-        GLIBC_ROOT="${TEST_SUITE_DIR}/sdcard/riscv/glibc"
+        MUSL_SRC="${TEST_SUITE_DIR}/sdcard/riscv/musl"
+        GLIBC_SRC="${TEST_SUITE_DIR}/sdcard/riscv/glibc"
+        echo "musl 输出: ${MUSL_SRC}"
+        echo "glibc 输出: ${GLIBC_SRC}"
     else
-        # 使用现有编译结果
-        MUSL_BIN="${TEST_BIN_DIR}"
-        GLIBC_BIN="${TEST_BIN_DIR}"
+        MUSL_SRC="${TEST_BIN_DIR}"
+        GLIBC_SRC="${TEST_BIN_DIR}"
     fi
 
-    # 创建 sdcard-rv.img（256MB）
-    echo "创建 sdcard-rv.img..."
-    create_ext4 "${SDCARD_IMG}" 256
+    # 创建 sdcard-rv.img
+    echo "创建 sdcard-rv.img (${SDCARD_SIZE}MB)..."
+    create_ext4 "${SDCARD_IMG}" ${SDCARD_SIZE}
 
-    # 创建 /musl/basic 目录并拷贝文件
-    echo "拷贝 musl 测试程序..."
+    # ===== 拷贝 musl 测试 =====
+    echo "拷贝 musl 测试..."
     debugfs_mkdir "${SDCARD_IMG}" "/musl"
-    if [ -d "$MUSL_BIN" ]; then
-        copy_tests_to_image "${SDCARD_IMG}" "/musl/basic" "$MUSL_BIN"
-    else
-        echo "  警告: musl 测试程序未找到: $MUSL_BIN"
+    if [ -d "${MUSL_SRC}/basic" ]; then
+        copy_tests_to_image "${SDCARD_IMG}" "/musl/basic" "${MUSL_SRC}/basic"
+    elif [ -d "${MUSL_SRC}" ]; then
+        copy_tests_to_image "${SDCARD_IMG}" "/musl/basic" "${MUSL_SRC}"
     fi
-
-    # 创建 /glibc/basic 目录并拷贝文件
-    echo "拷贝 glibc 测试程序..."
-    debugfs_mkdir "${SDCARD_IMG}" "/glibc"
-    if [ -d "$GLIBC_BIN" ]; then
-        copy_tests_to_image "${SDCARD_IMG}" "/glibc/basic" "$GLIBC_BIN"
-    else
-        echo "  警告: glibc 测试程序未找到: $GLIBC_BIN"
-    fi
-
-    # 创建 basic_testcode.sh（musl 版本）
-    debugfs_write "${SDCARD_IMG}" /dev/stdin "/musl/basic_testcode.sh" 2>/dev/null <<'SCRIPT'
-#!/bin/busybox
-echo "#### OS COMP TEST GROUP START basic-musl ####"
+    # musl basic_testcode.sh
+    debugfs_write_content "${SDCARD_IMG}" "/musl/basic_testcode.sh" \
+"#!/bin/busybox
+echo \"#### OS COMP TEST GROUP START basic-musl ####\"
 cd ./basic
 ./run-all.sh
 cd ..
-echo "#### OS COMP TEST GROUP END basic-musl ####"
-SCRIPT
+echo \"#### OS COMP TEST GROUP END basic-musl ####\""
     debugfs -w -R "set_inode_field /musl/basic_testcode.sh mode 0100755" "${SDCARD_IMG}" >/dev/null 2>&1
 
-    # 创建 basic_testcode.sh（glibc 版本）
-    debugfs_write "${SDCARD_IMG}" /dev/stdin "/glibc/basic_testcode.sh" 2>/dev/null <<'SCRIPT'
-#!/bin/busybox
-echo "#### OS COMP TEST GROUP START basic-glibc ####"
+    # ===== 拷贝 glibc 测试 =====
+    echo "拷贝 glibc 测试..."
+    debugfs_mkdir "${SDCARD_IMG}" "/glibc"
+    if [ -d "${GLIBC_SRC}/basic" ]; then
+        copy_tests_to_image "${SDCARD_IMG}" "/glibc/basic" "${GLIBC_SRC}/basic"
+    elif [ -d "${GLIBC_SRC}" ]; then
+        copy_tests_to_image "${SDCARD_IMG}" "/glibc/basic" "${GLIBC_SRC}"
+    fi
+    # glibc basic_testcode.sh
+    debugfs_write_content "${SDCARD_IMG}" "/glibc/basic_testcode.sh" \
+"#!/bin/busybox
+echo \"#### OS COMP TEST GROUP START basic-glibc ####\"
 cd ./basic
 ./run-all.sh
 cd ..
-echo "#### OS COMP TEST GROUP END basic-glibc ####"
-SCRIPT
+echo \"#### OS COMP TEST GROUP END basic-glibc ####\""
     debugfs -w -R "set_inode_field /glibc/basic_testcode.sh mode 0100755" "${SDCARD_IMG}" >/dev/null 2>&1
 
-    # 创建测试所需的目录和文件（在 musl 和 glibc 各一份）
+    # ===== 拷贝 glibc 共享库（评测机标配） =====
+    debugfs_mkdir "${SDCARD_IMG}" "/glibc/lib"
+    if [ -d "${GLIBC_SRC}/lib" ]; then
+        echo "拷贝 glibc 共享库..."
+        for libfile in "${GLIBC_SRC}/lib/"*; do
+            [ -f "$libfile" ] || continue
+            base=$(basename "$libfile")
+            debugfs_write "${SDCARD_IMG}" "$libfile" "/glibc/lib/${base}"
+            echo "  lib: ${base}"
+        done
+    fi
+
+    # ===== 创建测试需要的目录和文件 =====
     for prefix in "/musl" "/glibc"; do
         debugfs_mkdir "${SDCARD_IMG}" "${prefix}/basic/mnt"
         debugfs_mkdir "${SDCARD_IMG}" "${prefix}/test_chdir"
         debugfs_mkdir "${SDCARD_IMG}" "${prefix}/test_mkdir"
-        # 空文件
         debugfs_write "${SDCARD_IMG}" /dev/null "${prefix}/test_close.txt" 2>/dev/null
         debugfs_write "${SDCARD_IMG}" /dev/null "${prefix}/test_mmap.txt" 2>/dev/null
     done
@@ -282,16 +299,15 @@ else
     fi
 fi
 
-# 创建 basic_testcode.sh（如果不存在）
+# 创建 basic_testcode.sh
 debugfs -w -R "rm /basic_testcode.sh" "${FS_IMG}" 2>/dev/null || true
-debugfs_write "${FS_IMG}" /dev/stdin "/basic_testcode.sh" 2>/dev/null <<'SCRIPT'
-#!/bin/busybox
-echo "#### OS COMP TEST GROUP START basic ####"
+debugfs_write_content "${FS_IMG}" "/basic_testcode.sh" \
+"#!/bin/busybox
+echo \"#### OS COMP TEST GROUP START basic ####\"
 cd ./basic
 ./run-all.sh
 cd ..
-echo "#### OS COMP TEST GROUP END basic ####"
-SCRIPT
+echo \"#### OS COMP TEST GROUP END basic ####\""
 debugfs -w -R "set_inode_field /basic_testcode.sh mode 0100755" "${FS_IMG}" >/dev/null 2>&1
 
 # 创建测试需要的目录
