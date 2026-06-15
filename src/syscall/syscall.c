@@ -720,7 +720,6 @@ uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 
 	if (copyinstr(p->pagetable, path, filename, sizeof(path)) < 0)
 		return -EFAULT;
-
 	/* 绝对路径用 root，相对路径用 CWD */
 	struct file *f = vfs_open_cwd(path, O_RDONLY, path[0] == '/' ? NULL : p->pwd);
 	if (IS_ERR(f))
@@ -1206,8 +1205,35 @@ uintptr_t sys_dup3(uintptr_t oldfd, uintptr_t newfd, uintptr_t flags)
 	(void)flags;
 	struct proc *p = curproc();
 
-	if ((int)newfd < 0 || (int)newfd >= (int)p->fd_table->max_fds)
+	if ((int)newfd < 0)
 		return -EBADF;
+
+	/* 若 newfd 超过当前表大小则扩展 */
+	struct fd_table *fdt = p->fd_table;
+	if ((u32)newfd >= fdt->max_fds) {
+		u32 new_max = fdt->max_fds * 2;
+		while (new_max <= (u32)newfd && new_max < NR_OPEN_MAX)
+			new_max *= 2;
+		if (new_max > NR_OPEN_MAX)
+			new_max = NR_OPEN_MAX;
+		if ((u32)newfd >= new_max)
+			return -EBADF;
+
+		spinlock_acquire(&fdt->lock);
+		struct file **new_fds = kmalloc(sizeof(struct file *) * new_max);
+		if (!new_fds) {
+			spinlock_release(&fdt->lock);
+			return -ENOMEM;
+		}
+		for (u32 i = 0; i < fdt->max_fds; i++)
+			new_fds[i] = fdt->fds[i];
+		for (u32 i = fdt->max_fds; i < new_max; i++)
+			new_fds[i] = NULL;
+		kfree(fdt->fds);
+		fdt->fds = new_fds;
+		fdt->max_fds = new_max;
+		spinlock_release(&fdt->lock);
+	}
 
 	if ((int)oldfd == (int)newfd)
 		return -EINVAL;
