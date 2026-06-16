@@ -2,7 +2,12 @@
  * init.c — 比赛测试运行器
  * 启动后扫描根目录找 *_testcode.sh，提取组名，
  * 然后进入对应子目录 (如 /basic/) 扫描并运行所有 ELF 测试
+ *
+ * 两种模式可切换：
+ *   USE_TABLE_DRIVEN — 表驱动，预定义测试列表，不依赖 getdents64
+ *   注释掉 USE_TABLE_DRIVEN — 原有目录扫描模式
  */
+#define USE_TABLE_DRIVEN
 
 /* Syscall 编号 (Linux RISC-V ABI) */
 #define SYS_read        63
@@ -355,6 +360,85 @@ static void run_elfs_in_dir(const char *dirpath)
 	my_close(fd);
 }
 
+/* ───── 表驱动测试（USE_TABLE_DRIVEN） ───── */
+
+struct test_entry {
+	const char *name;
+	int enabled;
+};
+
+static struct test_entry basic_tests[] = {
+	{"brk", 1}, {"chdir", 1}, {"clone", 1}, {"close", 1},
+	{"dup", 1}, {"dup2", 1}, {"execve", 1}, {"exit", 1},
+	{"fork", 1}, {"fstat", 1}, {"getcwd", 1}, {"getdents", 1},
+	{"getpid", 1}, {"getppid", 1}, {"gettimeofday", 1}, {"mkdir_", 1},
+	{"mmap", 1}, {"mount", 1}, {"munmap", 1}, {"open", 1},
+	{"openat", 1}, {"pipe", 1}, {"read", 1}, {"sleep", 1},
+	{"test_echo", 1}, {"times", 1}, {"umount", 1}, {"uname", 1},
+	{"unlink", 1}, {"wait", 1}, {"waitpid", 1}, {"write", 1},
+	{"yield", 1},
+};
+static int basic_test_cnt = sizeof(basic_tests) / sizeof(basic_tests[0]);
+
+static const char *libc_roots[] = {"/musl", "/glibc"};
+
+static void run(const char *path, const char *workdir)
+{
+	prints("  run: ");
+	prints(path);
+	println();
+
+	long pid = my_fork();
+	if (pid == 0) {
+		if (workdir)
+			my_chdir(workdir);
+		long argv[2] = {(long)path, 0};
+		long ret = my_execve(path, (long)argv, 0);
+		prints("[FAIL] execve: ");
+		printn(ret);
+		println();
+		my_exit(127);
+	}
+	int status = 0;
+	my_wait4(pid, &status, 0, 0);
+}
+
+static void run_all_tests(void)
+{
+	for (int r = 0; r < 2; r++) {
+		prints("#### OS COMP TEST GROUP START ");
+		prints(libc_roots[r] + 1);
+		prints("-basic ####");
+		println();
+
+		for (int i = 0; i < basic_test_cnt; i++) {
+			if (!basic_tests[i].enabled) {
+				prints("  skip: ");
+				prints(basic_tests[i].name);
+				println();
+				continue;
+			}
+			char path[256];
+			my_strcpy(path, libc_roots[r]);
+			my_strcat(path, "/basic/");
+			my_strcat(path, basic_tests[i].name);
+			char wd[64];
+			my_strcpy(wd, libc_roots[r]);
+			my_strcat(wd, "/basic/");
+			run(path, wd);
+			if (my_strcmp(basic_tests[i].name, "yield") == 0)
+				break;
+		}
+
+		prints("#### OS COMP TEST GROUP END ");
+		prints(libc_roots[r] + 1);
+		prints("-basic ####");
+		println();
+	}
+}
+
+/* ───── _start 入口 ───── */
+
 __attribute__((section(".text.entry"), noinline, noreturn))
 void _start(void)
 {
@@ -363,8 +447,11 @@ void _start(void)
 	prints("#### OS COMP TEST START ####");
 	println();
 
-	/* 第1遍：扫描根目录下的 *_testcode.sh（兼容旧格式 fs.img）*/
-	{
+#ifdef USE_TABLE_DRIVEN
+	run_all_tests();
+#else
+		/* 第1遍：扫描根目录下的 *_testcode.sh（兼容旧格式 fs.img）*/
+		{
 		int fd = my_openat(-100, "/", O_RDONLY | O_DIRECTORY);
 		if (fd < 0) { my_exit(1); }
 
@@ -541,6 +628,7 @@ void _start(void)
 		prints(" ####");
 		println();
 	}
+#endif /* USE_TABLE_DRIVEN */
 
 	/* 测试结束，直接关机 */
 	prints("#### OS COMP TEST END ####");
