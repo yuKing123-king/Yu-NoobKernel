@@ -4,6 +4,8 @@
  * 组目录硬编码在 scan_groups[] 中，不依赖 *_testcode.sh 扫描。
  */
 
+/* #define DEBUG_DUMP_TREE */   /* 取消注释启用目录树转储（调试用） */
+
 /* Syscall 编号 (Linux RISC-V ABI) */
 #define SYS_read        63
 #define SYS_write       64
@@ -184,6 +186,56 @@ static void my_shutdown(void)
 	while (1) {}
 }
 
+/* 递归遍历目录树，打印完整结构（调试用） */
+static void dump_tree(const char *path, int depth)
+{
+	if (depth > 6) return;
+	int fd = my_openat(-100, path, O_RDONLY | O_DIRECTORY);
+	if (fd < 0) {
+		prints("[INFO] dump_tree: cannot open ");
+		prints(path);
+		println();
+		return;
+	}
+	char buf[4096];
+	long nread;
+	while ((nread = my_getdents64(fd, buf, sizeof(buf))) > 0) {
+		int pos = 0;
+		while (pos < (int)nread) {
+			struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + pos);
+			if (d->d_reclen == 0) break;
+			char *name = d->d_name;
+			if (name[0] == '.' && (name[1] == '\0' ||
+			    (name[1] == '.' && name[2] == '\0'))) {
+				pos += d->d_reclen;
+				continue;
+			}
+			for (int i = 0; i < depth; i++) prints("  ");
+			prints("[INFO] ");
+			printn(d->d_ino);
+			switch (d->d_type) {
+			case DT_DIR: prints(" [DIR]  "); break;
+			case DT_REG: prints(" [FILE] "); break;
+			default:     prints(" [?]    "); break;
+			}
+			prints(name);
+			println();
+			if (d->d_type == DT_DIR) {
+				char subpath[256];
+				my_strcpy(subpath, path);
+				int plen = my_strlen(path);
+				if (plen > 0 && path[plen - 1] != '/')
+					my_strcat(subpath, "/");
+				my_strcat(subpath, name);
+				if (my_strlen(subpath) < 255)
+					dump_tree(subpath, depth + 1);
+			}
+			pos += d->d_reclen;
+		}
+	}
+	my_close(fd);
+}
+
 static int is_elf_path(const char *path)
 {
 	int fd = my_openat(-100, path, O_RDONLY);
@@ -302,6 +354,14 @@ __attribute__((section(".text.entry"), noinline, noreturn))
 void _start(void)
 {
 	my_brk(0);
+
+#ifdef DEBUG_DUMP_TREE
+	prints("[INFO] ===== filesystem tree =====");
+	println();
+	dump_tree("/", 0);
+	prints("[INFO] ===== end filesystem tree =====");
+	println();
+#endif
 
 	prints("#### OS COMP TEST START ####");
 	println();
