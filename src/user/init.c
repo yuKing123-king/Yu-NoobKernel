@@ -215,6 +215,10 @@ static void scan_dir_for_scripts(const char *dirpath)
 	int fd = my_openat(-100, dirpath, O_RDONLY | O_DIRECTORY);
 	if (fd < 0) return;
 
+	prints("[init] scan_dir: ");
+	prints(dirpath);
+	println();
+
 	char buf[4096];
 	long nread;
 	while ((nread = my_getdents64(fd, buf, sizeof(buf))) > 0) {
@@ -229,21 +233,24 @@ static void scan_dir_for_scripts(const char *dirpath)
 				pos += d->d_reclen;
 				continue;
 			}
-	if (is_test_script(name) && group_count < MAX_GROUPS) {
-		char subdir[256];
-		int nlen = my_strlen(name) - 12;
-		my_strcpy(subdir, dirpath);
-		int dlen = my_strlen(subdir);
-		for (int j = 0; j < nlen; j++)
-			subdir[dlen + j] = name[j];
-		subdir[dlen + nlen] = '/';
-		subdir[dlen + nlen + 1] = '\0';
-		my_strcpy(groups[group_count], subdir);
-		group_count++;
-	}
-			pos += d->d_reclen;
+		if (is_test_script(name) && group_count < MAX_GROUPS) {
+			prints("[init]   found: ");
+			prints(name);
+			println();
+			char subdir[256];
+			int nlen = my_strlen(name) - 12;
+			my_strcpy(subdir, dirpath);
+			int dlen = my_strlen(subdir);
+			for (int j = 0; j < nlen; j++)
+				subdir[dlen + j] = name[j];
+			subdir[dlen + nlen] = '/';
+			subdir[dlen + nlen + 1] = '\0';
+			my_strcpy(groups[group_count], subdir);
+			group_count++;
 		}
-	}
+				pos += d->d_reclen;
+			}
+		}
 	my_close(fd);
 }
 
@@ -402,11 +409,22 @@ void _start(void)
 						pos += d->d_reclen;
 						continue;
 					}
+					/* debug: 打印根目录每个条目的原始数据 */
+					prints("[init] root entry: type=");
+					printn(d->d_type);
+					prints(" reclen=");
+					printn(d->d_reclen);
+					prints(" name=");
+					prints(name);
+					println();
 					if (d->d_type == DT_DIR  /* 4 = DT_DIR */) {
 						char subpath[256];
 						my_strcpy(subpath, "/");
 						my_strcat(subpath, name);
 						my_strcat(subpath, "/");
+						prints("[init] scanning: ");
+						prints(subpath);
+						println();
 						scan_dir_for_scripts(subpath);
 					}
 					pos += d->d_reclen;
