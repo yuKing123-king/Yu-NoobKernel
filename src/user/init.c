@@ -1,13 +1,8 @@
 /*
  * init.c — 比赛测试运行器
- * 启动后扫描根目录找 *_testcode.sh，提取组名，
- * 然后进入对应子目录 (如 /basic/) 扫描并运行所有 ELF 测试
- *
- * 两种模式可切换：
- *   USE_TABLE_DRIVEN — 表驱动，预定义测试列表，不依赖 getdents64
- *   注释掉 USE_TABLE_DRIVEN — 原有目录扫描模式
+ * 启动后扫描指定目录下的所有 ELF 测试文件并运行。
+ * 组目录硬编码在 scan_groups[] 中，不依赖 *_testcode.sh 扫描。
  */
-#define USE_TABLE_DRIVEN
 
 /* Syscall 编号 (Linux RISC-V ABI) */
 #define SYS_read        63
@@ -188,76 +183,6 @@ static void my_shutdown(void)
 	syscall1(SYS_shutdown, 0);
 	while (1) {}
 }
-static long heap_end = 0;
-
-#define MAX_GROUPS 32
-#define MAX_NAME    64
-
-static char groups[MAX_GROUPS][MAX_NAME];
-static int group_count = 0;
-
-static int is_test_script(const char *name)
-{
-	int len = my_strlen(name);
-	if (len <= 12) return 0;
-	return my_strcmp(name + len - 12, "_testcode.sh") == 0;
-}
-
-static int extract_group(const char *name, char *out, int maxlen)
-{
-	int len = my_strlen(name);
-	int glen = len - 12;
-	if (glen <= 0 || glen >= maxlen) return -1;
-	for (int i = 0; i < glen; i++) out[i] = name[i];
-	out[glen] = '\0';
-	return 0;
-}
-
-/* scan_dir_for_testscripts: scan a directory for *_testcode.sh,
- * add each parent dir to groups[] as the group name */
-static void scan_dir_for_scripts(const char *dirpath)
-{
-	int fd = my_openat(-100, dirpath, O_RDONLY | O_DIRECTORY);
-	if (fd < 0) return;
-
-	prints("[init] scan_dir: ");
-	prints(dirpath);
-	println();
-
-	char buf[4096];
-	long nread;
-	while ((nread = my_getdents64(fd, buf, sizeof(buf))) > 0) {
-		int pos = 0;
-		while (pos < (int)nread) {
-			struct linux_dirent64 *d =
-			    (struct linux_dirent64 *)(buf + pos);
-			if (d->d_reclen == 0) break;
-			char *name = d->d_name;
-			if (name[0] == '.' && (name[1] == '\0' ||
-			    (name[1] == '.' && name[2] == '\0'))) {
-				pos += d->d_reclen;
-				continue;
-			}
-		if (is_test_script(name) && group_count < MAX_GROUPS) {
-			prints("[init]   found: ");
-			prints(name);
-			println();
-			char subdir[256];
-			int nlen = my_strlen(name) - 12;
-			my_strcpy(subdir, dirpath);
-			int dlen = my_strlen(subdir);
-			for (int j = 0; j < nlen; j++)
-				subdir[dlen + j] = name[j];
-			subdir[dlen + nlen] = '/';
-			subdir[dlen + nlen + 1] = '\0';
-			my_strcpy(groups[group_count], subdir);
-			group_count++;
-		}
-				pos += d->d_reclen;
-			}
-		}
-	my_close(fd);
-}
 
 static int is_elf_path(const char *path)
 {
@@ -287,7 +212,7 @@ static int is_shell_needed(const char *name)
 	return 0;
 }
 
-/* 在子目录 dirpath 下运行所有 ELF 文件 */
+/* 在子目录 dirpath 下扫描并运行所有 ELF 文件 */
 static void run_elfs_in_dir(const char *dirpath)
 {
 	int fd = my_openat(-100, dirpath, O_RDONLY | O_DIRECTORY);
@@ -296,7 +221,6 @@ static void run_elfs_in_dir(const char *dirpath)
 	char buf[4096];
 	long nread;
 
-	/* 循环调用 getdents64 直到读完所有条目 */
 	while ((nread = my_getdents64(fd, buf, sizeof(buf))) > 0) {
 		int pos = 0;
 		while (pos < (int)nread) {
@@ -360,275 +284,41 @@ static void run_elfs_in_dir(const char *dirpath)
 	my_close(fd);
 }
 
-/* ───── 表驱动测试（USE_TABLE_DRIVEN） ───── */
+/* ───── 组目录定义 ───── */
 
-struct test_entry {
-	const char *name;
-	int enabled;
+static const char *scan_groups[] = {
+	"/musl/basic/",
+	"/glibc/basic/",
 };
-
-static struct test_entry basic_tests[] = {
-	{"brk", 1}, {"chdir", 1}, {"clone", 1}, {"close", 1},
-	{"dup", 1}, {"dup2", 1}, {"execve", 1}, {"exit", 1},
-	{"fork", 1}, {"fstat", 1}, {"getcwd", 1}, {"getdents", 1},
-	{"getpid", 1}, {"getppid", 1}, {"gettimeofday", 1}, {"mkdir_", 1},
-	{"mmap", 1}, {"mount", 1}, {"munmap", 1}, {"open", 1},
-	{"openat", 1}, {"pipe", 1}, {"read", 1}, {"sleep", 1},
-	{"test_echo", 1}, {"times", 1}, {"umount", 1}, {"uname", 1},
-	{"unlink", 1}, {"wait", 1}, {"waitpid", 1}, {"write", 1},
-	{"yield", 1},
+static const char *scan_group_names[] = {
+	"basic-musl",
+	"basic-glibc",
 };
-static int basic_test_cnt = sizeof(basic_tests) / sizeof(basic_tests[0]);
-
-static const char *libc_roots[] = {"/musl", "/glibc"};
-
-static void run(const char *path, const char *workdir)
-{
-	prints("  run: ");
-	prints(path);
-	println();
-
-	long pid = my_fork();
-	if (pid == 0) {
-		if (workdir)
-			my_chdir(workdir);
-		long argv[2] = {(long)path, 0};
-		long ret = my_execve(path, (long)argv, 0);
-		prints("[FAIL] execve: ");
-		printn(ret);
-		println();
-		my_exit(127);
-	}
-	int status = 0;
-	my_wait4(pid, &status, 0, 0);
-}
-
-static void run_all_tests(void)
-{
-	for (int r = 0; r < 2; r++) {
-		prints("#### OS COMP TEST GROUP START ");
-		prints(libc_roots[r] + 1);
-		prints("-basic ####");
-		println();
-
-		for (int i = 0; i < basic_test_cnt; i++) {
-			if (!basic_tests[i].enabled) {
-				prints("  skip: ");
-				prints(basic_tests[i].name);
-				println();
-				continue;
-			}
-			char path[256];
-			my_strcpy(path, libc_roots[r]);
-			my_strcat(path, "/basic/");
-			my_strcat(path, basic_tests[i].name);
-			char wd[64];
-			my_strcpy(wd, libc_roots[r]);
-			my_strcat(wd, "/basic/");
-			run(path, wd);
-			if (my_strcmp(basic_tests[i].name, "yield") == 0)
-				break;
-		}
-
-		prints("#### OS COMP TEST GROUP END ");
-		prints(libc_roots[r] + 1);
-		prints("-basic ####");
-		println();
-	}
-}
+static int scan_group_cnt = 2;
 
 /* ───── _start 入口 ───── */
 
 __attribute__((section(".text.entry"), noinline, noreturn))
 void _start(void)
 {
-	heap_end = my_brk(0);
+	my_brk(0);
 
 	prints("#### OS COMP TEST START ####");
 	println();
 
-#ifdef USE_TABLE_DRIVEN
-	run_all_tests();
-#else
-		/* 第1遍：扫描根目录下的 *_testcode.sh（兼容旧格式 fs.img）*/
-		{
-		int fd = my_openat(-100, "/", O_RDONLY | O_DIRECTORY);
-		if (fd < 0) { my_exit(1); }
-
-		char buf[4096];
-		long nread;
-		while ((nread = my_getdents64(fd, buf, sizeof(buf))) > 0) {
-			int pos = 0;
-			while (pos < (int)nread) {
-				struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + pos);
-				if (d->d_reclen == 0) break;
-				char *name = d->d_name;
-				if (name[0] == '.' && (name[1] == '\0' ||
-				    (name[1] == '.' && name[2] == '\0'))) {
-					pos += d->d_reclen;
-					continue;
-				}
-				if (is_test_script(name) && group_count < MAX_GROUPS) {
-					extract_group(name, groups[group_count], MAX_NAME);
-					group_count++;
-				}
-				pos += d->d_reclen;
-			}
-		}
-		my_close(fd);
-	}
-
-	/* 第2遍：扫描根下一级子目录里的 *_testcode.sh（评测机 sdcard-rv.img 格式）
-	   例如 /musl/basic_testcode.sh → group = "/musl/" */
-	{
-		int fd = my_openat(-100, "/", O_RDONLY | O_DIRECTORY);
-		if (fd >= 0) {
-			char buf[4096];
-			long nread;
-			while ((nread = my_getdents64(fd, buf, sizeof(buf))) > 0) {
-				int pos = 0;
-				while (pos < (int)nread) {
-					struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + pos);
-					if (d->d_reclen == 0) break;
-					char *name = d->d_name;
-					if (name[0] == '.' && (name[1] == '\0' ||
-					    (name[1] == '.' && name[2] == '\0'))) {
-						pos += d->d_reclen;
-						continue;
-					}
-					/* debug: 打印根目录每个条目的原始数据 */
-					prints("[init] root entry: type=");
-					printn(d->d_type);
-					prints(" reclen=");
-					printn(d->d_reclen);
-					prints(" name=");
-					prints(name);
-					println();
-					if (d->d_type == DT_DIR  /* 4 = DT_DIR */) {
-						char subpath[256];
-						my_strcpy(subpath, "/");
-						my_strcat(subpath, name);
-						my_strcat(subpath, "/");
-						prints("[init] scanning: ");
-						prints(subpath);
-						println();
-						scan_dir_for_scripts(subpath);
-					}
-					pos += d->d_reclen;
-				}
-			}
-			my_close(fd);
-		}
-	}
-
-	/* 日志：打印所有发现的分组 */
-	/* 用于确认远程评测机是否识别到特定目录 */
-	prints("[init] groups:");
-	println();
-	for (int g = 0; g < group_count; g++) {
-		prints("  ");
-		prints(groups[g]);
-		println();
-	}
-
-	/* 处理所有找到的组 */
-	for (int g = 0; g < group_count; g++) {
-		char *group = groups[g];
-		int is_subdir = (group[0] == '/');
-
-		/* TODO: 临时只跑 basic 组 */
-		if (my_strcmp(group, "/musl/basic/") != 0 && my_strcmp(group, "/glibc/basic/") != 0 && my_strcmp(group, "basic") != 0)
-			continue;
-
-		if (!is_subdir && is_shell_needed(group)) {
-			/* 跳过需要 shell 的组，仅输出 markers */
-			prints("#### OS COMP TEST GROUP START ");
-			prints(group);
-			prints(" ####");
-			println();
-			prints("#### OS COMP TEST GROUP END ");
-			prints(group);
-			prints(" ####");
-			println();
-			continue;
-		}
-
-		char dirpath[256];
-		if (is_subdir) {
-			my_strcpy(dirpath, group);
-		} else {
-			my_strcpy(dirpath, "/");
-			my_strcat(dirpath, group);
-			my_strcat(dirpath, "/");
-		}
-
-		/* 输出 group marker */
+	for (int g = 0; g < scan_group_cnt; g++) {
 		prints("#### OS COMP TEST GROUP START ");
-		if (is_subdir) {
-			/* extract: "/musl/basic/" -> "basic-musl" */
-			char disp[64];
-			int di = 0, prev = 0, last = 0;
-			for (int si = 0; group[si]; si++)
-				if (group[si] == '/') { prev = last; last = si; }
-			for (int si = prev + 1; si < last; si++)
-				disp[di++] = group[si];
-			/* append -musl / -glibc suffix */
-			{
-				int has_musl = 0, has_glibc = 0;
-				for (int si = 0; group[si]; si++) {
-					if (group[si] == '/' && group[si+1] == 'm' && group[si+2] == 'u' && group[si+3] == 's' && group[si+4] == 'l' && group[si+5] == '/')
-						has_musl = 1;
-					if (group[si] == '/' && group[si+1] == 'g' && group[si+2] == 'l' && group[si+3] == 'i' && group[si+4] == 'b' && group[si+5] == 'c' && group[si+6] == '/')
-						has_glibc = 1;
-				}
-				if (has_musl) {
-					disp[di++] = '-'; disp[di++] = 'm'; disp[di++] = 'u'; disp[di++] = 's'; disp[di++] = 'l';
-				} else if (has_glibc) {
-					disp[di++] = '-'; disp[di++] = 'g'; disp[di++] = 'l'; disp[di++] = 'i'; disp[di++] = 'b'; disp[di++] = 'c';
-				}
-			}
-			disp[di] = '\0';
-			prints(disp);
-		} else {
-			prints(group);
-		}
+		prints(scan_group_names[g]);
 		prints(" ####");
 		println();
 
-		run_elfs_in_dir(dirpath);
+		run_elfs_in_dir(scan_groups[g]);
 
 		prints("#### OS COMP TEST GROUP END ");
-		if (is_subdir) {
-			char disp[64];
-			int di = 0, prev = 0, last = 0;
-			for (int si = 0; group[si]; si++)
-				if (group[si] == '/') { prev = last; last = si; }
-			for (int si = prev + 1; si < last; si++)
-				disp[di++] = group[si];
-			/* append -musl / -glibc suffix */
-			{
-				int has_musl = 0, has_glibc = 0;
-				for (int si = 0; group[si]; si++) {
-					if (group[si] == '/' && group[si+1] == 'm' && group[si+2] == 'u' && group[si+3] == 's' && group[si+4] == 'l' && group[si+5] == '/')
-						has_musl = 1;
-					if (group[si] == '/' && group[si+1] == 'g' && group[si+2] == 'l' && group[si+3] == 'i' && group[si+4] == 'b' && group[si+5] == 'c' && group[si+6] == '/')
-						has_glibc = 1;
-				}
-				if (has_musl) {
-					disp[di++] = '-'; disp[di++] = 'm'; disp[di++] = 'u'; disp[di++] = 's'; disp[di++] = 'l';
-				} else if (has_glibc) {
-					disp[di++] = '-'; disp[di++] = 'g'; disp[di++] = 'l'; disp[di++] = 'i'; disp[di++] = 'b'; disp[di++] = 'c';
-				}
-			}
-			disp[di] = '\0';
-			prints(disp);
-		} else {
-			prints(group);
-		}
+		prints(scan_group_names[g]);
 		prints(" ####");
 		println();
 	}
-#endif /* USE_TABLE_DRIVEN */
 
 	/* 测试结束，直接关机 */
 	prints("#### OS COMP TEST END ####");
