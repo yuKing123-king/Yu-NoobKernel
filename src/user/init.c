@@ -416,6 +416,16 @@ void _start(void)
 		}
 	}
 
+	/* 日志：打印所有发现的分组 */
+	/* 用于确认远程评测机是否识别到特定目录 */
+	prints("[init] groups:");
+	println();
+	for (int g = 0; g < group_count; g++) {
+		prints("  ");
+		prints(groups[g]);
+		println();
+	}
+
 	/* 处理所有找到的组 */
 	for (int g = 0; g < group_count; g++) {
 		char *group = groups[g];
