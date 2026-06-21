@@ -124,10 +124,13 @@ int ext4_fill_super(struct super_block *vsb, dev_t dev, void *data)
 			     sbi->blocks_per_group - 1) /
 			    sbi->blocks_per_group;
 
-	/* Descriptors per block: each descriptor is 32 bytes */
-	sbi->desc_per_block = sbi->block_size / sizeof(struct ext4_group_desc);
+	/* Descriptor size: 64 for 64bit feature, 32 otherwise */
+	if (sbi->sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT)
+		sbi->desc_size = 64;
+	else
+		sbi->desc_size = sizeof(struct ext4_group_desc);
 
-	/* ext4: extents and flex_bg feature checks (informational only) */
+	sbi->desc_per_block = sbi->block_size / sbi->desc_size;
 
 	vsb->s_fs_info     = sbi;
 	vsb->s_blocksize   = sbi->block_size;
@@ -159,7 +162,7 @@ static int ext4_read_group_desc(struct ext4_sb_info *sbi, u32 bg_idx,
 
 	/* Byte offset of descriptor bg_idx */
 	u64 offset = (u64)gdt_block * block_size +
-		     (u64)bg_idx * sizeof(struct ext4_group_desc);
+		     (u64)bg_idx * sbi->desc_size;
 
 	return ext4_read_at(sbi->dev, offset, bgd, sizeof(*bgd));
 }
@@ -187,7 +190,7 @@ static int ext4_write_group_desc(struct ext4_sb_info *sbi, u32 bg_idx,
 		gdt_block = 2;
 
 	u64 offset = (u64)gdt_block * block_size +
-		     (u64)bg_idx * sizeof(struct ext4_group_desc);
+		     (u64)bg_idx * sbi->desc_size;
 	return ext4_write_at(sbi->dev, offset, bgd, sizeof(*bgd));
 }
 
@@ -659,9 +662,6 @@ static int ext4_statfs(struct super_block *sb)
 	if (!sbi)
 		return -EIO;
 	/* Just log info for now */
-	infof("ext4: total blocks: %u, free: %u",
-	      sbi->sb.s_blocks_count_lo,
-	      sbi->sb.s_free_blocks_count_lo);
 	return 0;
 }
 
@@ -1414,6 +1414,5 @@ int ext4_init_fs(void)
 		panic("ext4: failed to register filesystem");
 		return ret;
 	}
-	infof("ext4: filesystem registered");
 	return 0;
 }

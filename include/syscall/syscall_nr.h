@@ -52,6 +52,7 @@
 /* 新增：文件系统操作 */
 #define SYS_mkdirat     34
 #define SYS_unlinkat    35
+#define SYS_symlinkat   174
 #define SYS_statx       291
 #define SYS_fstatat     79
 #define SYS_newfstatat  79
@@ -60,6 +61,29 @@
 #define SYS_rt_sigaction    134
 #define SYS_rt_sigprocmask  135
 #define SYS_sigprocmask     135
+#define SYS_tgkill          131
+#define SYS_kill            129
+
+/* 新增：IO 多路复用 */
+#define SYS_ppoll       73
+
+/* 新增：进程信息 */
+#define SYS_gettid      178
+#define SYS_geteuid     175
+#define SYS_getegid     177
+#define SYS_getgid      176
+#define SYS_getpgid     155
+#define SYS_getsid      156
+#define SYS_getpgrp     155 /* RISC-V: getpgid 别名 */
+
+/* 新增：文件系统辅助 */
+#define SYS_faccessat   48
+#define SYS_readlinkat  78
+#define SYS_sendfile    71
+
+/* 新增：资源/robust list */
+#define SYS_set_robust_list  99
+#define SYS_prlimit64        261
 
 /* 新增：杂项 */
 #define SYS_uname      160

@@ -18,6 +18,9 @@
 #include <ipc/pipe.h>
 
 #include <misc/errno.h>
+
+/* 用户栈页数（64KB = 16 pages，busybox sh 需要约 8-12KB） */
+#define STACK_PAGES     16
 #include <misc/align.h>
 #include <hal/riscv.h>
 #include <misc/cputime.h>
@@ -92,8 +95,19 @@ uintptr_t sys_write(int fd, uintptr_t buf, size_t len)
 	size_t n = len < sizeof(tmp) ? len : sizeof(tmp);
 	struct proc *p = curproc();
 
+	/* 即使 fd==1/2，如果已被 dup 重定向到真实文件则走 file_write */
 	if (fd == 1 || fd == 2) {
-		/* stdout/stderr → SBI console */
+		struct file *f = fd_get(p->fd_table, fd);
+		if (f) {
+			if (copyin(p->pagetable, tmp, buf, n) < 0) {
+				file_put(f);
+				return -EFAULT;
+			}
+			ssize_t ret = file_write(f, tmp, n);
+			file_put(f);
+			return ret < 0 ? ret : n;
+		}
+		/* 没有文件（原始控制台）-> SBI */
 		if (copyin(p->pagetable, tmp, buf, n) < 0)
 			return -EFAULT;
 		for (size_t i = 0; i < n; i++)
@@ -139,6 +153,19 @@ uintptr_t sys_read(int fd, uintptr_t buf, size_t len)
 
 	file_put(f);
 	return ret;
+}
+
+/* execve 失败后用户空间已被销毁，不能 return 到用户态，
+   必须像 sys_exit 一样终止当前进程 */
+static void execve_die(int status)
+{
+	struct proc *p = curproc();
+	p->exit_code = status;
+	p->state = PROC_ZOMBIE;
+	if (p->parent)
+		wait_queue_wakeup_one(&p->parent->child_wait);
+	sched_yield();
+	panic("unreachable");
 }
 
 /* ============================================================
@@ -234,7 +261,7 @@ uintptr_t sys_openat(uintptr_t dirfd, uintptr_t pathname, uintptr_t flags, uintp
 		else
 			base = p->pwd;
 	}
-	/* Normalize O_CREATE(0x40) → O_CREAT(0x100) for all callers */
+	/* Normalize O_CREATE(0x40) -> O_CREAT(0x100) for all callers */
 	u32 norm_flags = (u32)flags;
 	if (norm_flags & 0x40) norm_flags |= O_CREAT;
 	struct file *f = vfs_open_cwd(path, norm_flags, base);
@@ -306,12 +333,12 @@ uintptr_t sys_getdents(uintptr_t fd, uintptr_t buf, uintptr_t count)
 		*(u64 *)(out + written + 0)  = de->d_ino;
 		*(u64 *)(out + written + 8)  = de->d_off;
 		*(u16 *)(out + written + 16) = (u16)reclen;
-		/* 映射 ext4 file_type → Linux d_type */
+		/* 映射 ext4 file_type -> Linux d_type */
 			u8 ltype;
 			switch (de->d_type) {
-			case 1: ltype = 8;  break; /* EXT4_FT_REG_FILE → DT_REG */
-			case 2: ltype = 4;  break; /* EXT4_FT_DIR     → DT_DIR */
-			case 7: ltype = 10; break; /* EXT4_FT_SYMLINK → DT_LNK */
+			case 1: ltype = 8;  break; /* EXT4_FT_REG_FILE -> DT_REG */
+			case 2: ltype = 4;  break; /* EXT4_FT_DIR     -> DT_DIR */
+			case 7: ltype = 10; break; /* EXT4_FT_SYMLINK -> DT_LNK */
 			default: ltype = 0; break;
 			}
 			*(u8  *)(out + written + 18) = ltype;
@@ -399,7 +426,7 @@ uintptr_t sys_fork(void)
 	/* 继承 brk */
 	child->brk_end = parent->brk_end;
 
-	/* 设置上下文：forkret → usertrapret → 用户态 */
+	/* 设置上下文：forkret -> usertrapret -> 用户态 */
 	child->ctx.ra = (uintptr_t)forkret;
 	child->ctx.sp = (uintptr_t)child->kstack + KSTACK_SIZE;
 	child->ctx.sstatus = 0;	/* 首次进入不启用中断，由 usertrapret 控制 */
@@ -433,7 +460,7 @@ fail:
 }
 
 /*
- * sys_clone — 创建子进程（支持 CLONE_VM 共享页表 + 指定子进程栈）
+ * sys_clone - 创建子进程（支持 CLONE_VM 共享页表 + 指定子进程栈）
  * RISC-V ABI: clone(flags, child_stack, ptid, ctid, tls)
  * 当 CLONE_VM 置位时，父子共享页表（线程风格）
  * child_stack 指定子进程的初始 sp（不为 0 时使用，否则继承父进程 sp）
@@ -450,12 +477,6 @@ uintptr_t sys_clone(uintptr_t flags, uintptr_t child_stack, uintptr_t ptid,
 	child->tgid = child->pid;
 	child->parent = parent;
 
-	/*
-	 * CLONE_VM: Linux 语义应共享页表，但共享页表意味着 TRAPFRAME 也需要
-	 * 在上下文切换时重新映射（两个线程共用页表但各有自己的 trapframe）。
-	 * 当前调度器不支持动态更新 TRAPFRAME 映射，因此这里统一复制页表。
-	 * 子进程仍能通过 child_stack 获得独立的栈。
-	 */
 	child->pagetable = uvmcreate();
 	if (!child->pagetable)
 		goto fail;
@@ -464,10 +485,6 @@ uintptr_t sys_clone(uintptr_t flags, uintptr_t child_stack, uintptr_t ptid,
 		goto fail_freept;
 	}
 
-	/*
-	 * fd_table: CLONE_FILES 置位时共享，否则复制 (dup)
-	 * fork (flags=0) 走复制分支，clone with CLONE_FILES 走共享分支
-	 */
 	fd_table_free(child->fd_table);
 	if (flags & CLONE_FILES) {
 		child->fd_table = parent->fd_table;
@@ -492,12 +509,6 @@ uintptr_t sys_clone(uintptr_t flags, uintptr_t child_stack, uintptr_t ptid,
 	/* 子进程返回 0 */
 	child->tf->a0 = 0;
 
-	/*
-	 * fork 时继承父进程 sp，clone 时使用指定的 child_stack。
-	 * 仅当 child_stack 是合法用户态地址时才设为子进程栈：
-	 * 要求 >= PAGE_SIZE（过滤 fd 号等小值垃圾）且 < USER_TOP。
-	 * 防止用户态 fork 调用者未清零 a1 传入的残留值被误用。
-	 */
 	if (child_stack >= PAGE_SIZE && child_stack < USER_TOP) {
 		child->tf->sp = child_stack;
 	}
@@ -520,7 +531,7 @@ uintptr_t sys_clone(uintptr_t flags, uintptr_t child_stack, uintptr_t ptid,
 	/* 继承 brk */
 	child->brk_end = parent->brk_end;
 
-	/* 设置上下文：forkret → usertrapret → 用户态 */
+	/* 设置上下文：forkret -> usertrapret -> 用户态 */
 	child->ctx.ra = (uintptr_t)forkret;
 	child->ctx.sp = (uintptr_t)child->kstack + KSTACK_SIZE;
 	child->ctx.sstatus = 0;
@@ -584,6 +595,7 @@ typedef struct {
 
 #define PT_LOAD 1
 #define PT_INTERP 3
+#define PT_TLS  4
 #define PT_PHDR 6
 #define PF_X 1
 #define PF_W 2
@@ -599,11 +611,11 @@ typedef struct {
 #define AT_PHENT  4
 #define AT_RANDOM 25
 
-/* Interpreter base address — far from PIE program (vaddr ~0) */
+/* Interpreter base address - far from PIE program (vaddr ~0) */
 #define INTERP_BASE  0x400000ULL
 
 /*
- * load_elf — 加载 ELF 文件的 PT_LOAD 段到用户页表
+ * load_elf - 加载 ELF 文件的 PT_LOAD 段到用户页表
  * @f:         已打开的 ELF 文件
  * @p:         目标进程
  * @ehdr:      已读取的 ELF header
@@ -639,7 +651,7 @@ static int load_elf(struct file *f, struct proc *p, elf64_ehdr_t *ehdr,
 		uintptr_t end = base_addr + PAGE_ALIGN_UP(phdr.p_vaddr + phdr.p_memsz);
 
 		/* 不允许覆盖 TRAMPOLINE / TRAPFRAME / 栈区 */
-		if (end > USER_TOP - PAGE_SIZE ||
+		if (end > USER_TOP - STACK_PAGES * PAGE_SIZE ||
 		    (end > TRAPFRAME && va < TRAPFRAME + PAGE_SIZE)) {
 			return -EINVAL;
 		}
@@ -649,7 +661,7 @@ static int load_elf(struct file *f, struct proc *p, elf64_ehdr_t *ehdr,
 
 		/* 分配物理页并映射（先 RWX，后续可根据 p_flags 收紧权限） */
 		for (uintptr_t a = va; a < end; a += PAGE_SIZE) {
-			uintptr_t pa = (uintptr_t)kzalloc(PAGE_SIZE); /* <项目内: src/mm/slab.h> */
+			uintptr_t pa = (uintptr_t)kzalloc(PAGE_SIZE);
 			if (!pa)
 				return -ENOMEM;
 
@@ -671,10 +683,10 @@ static int load_elf(struct file *f, struct proc *p, elf64_ehdr_t *ehdr,
 			while (remaining > 0) {
 				char tmp[512];
 				u64 chunk = remaining < sizeof(tmp) ? remaining : sizeof(tmp);
-				ssize_t rd = file_read(f, tmp, chunk); /* <项目内: src/fs/file.h> */
+				ssize_t rd = file_read(f, tmp, chunk);
 				if (rd <= 0)
 					break;
-				if (copyout(p->pagetable, dst + off, tmp, rd) < 0) /* <项目内: src/mm/uvm.c> */
+				if (copyout(p->pagetable, dst + off, tmp, rd) < 0)
 					return -ENOMEM;
 				off += rd;
 				remaining -= rd;
@@ -687,12 +699,30 @@ static int load_elf(struct file *f, struct proc *p, elf64_ehdr_t *ehdr,
 
 	/* 计算 AT_PHDR 值：program headers 在用户态的地址 */
 	if (phdr_addr_out && phdr_num_out) {
-		uintptr_t phdr_user_addr = base_addr + ehdr->e_phoff;
+		uintptr_t phdr_user_addr = 0;
+		int found = 0;
 
-		/* 如果 ELF 有 PT_PHDR 段（type=6），使用其 p_vaddr */
+		/* 遍历 PT_LOAD 找到包含 e_phoff 的段 */
 		file_lseek(f, ehdr->e_phoff, SEEK_SET);
 		for (int i = 0; i < ehdr->e_phnum; i++) {
 			elf64_phdr_t ph;
+			if (file_read(f, &ph, sizeof(ph)) < (ssize_t)sizeof(ph))
+				continue;
+			if (ph.p_type == PT_LOAD &&
+			    ehdr->e_phoff >= ph.p_offset &&
+			    ehdr->e_phoff < ph.p_offset + ph.p_filesz) {
+				phdr_user_addr = base_addr + ph.p_vaddr +
+						 (ehdr->e_phoff - ph.p_offset);
+				found = 1;
+				break;
+			}
+		}
+		if (!found)
+			phdr_user_addr = base_addr + ehdr->e_phoff;
+		/* PT_PHDR 段优先覆盖 */
+		for (int i = 0; i < ehdr->e_phnum; i++) {
+			elf64_phdr_t ph;
+			file_lseek(f, ehdr->e_phoff + i * ehdr->e_phentsize, SEEK_SET);
 			if (file_read(f, &ph, sizeof(ph)) < (ssize_t)sizeof(ph))
 				break;
 			if (ph.p_type == PT_PHDR) {
@@ -713,6 +743,42 @@ static int load_elf(struct file *f, struct proc *p, elf64_ehdr_t *ehdr,
 	return 0;
 }
 
+static int copyin_str_array(pagetable_t pt, uintptr_t uarray,
+			    char ***out, int max)
+{
+	if (uarray == 0) { *out = NULL; return 0; }
+
+	/* 第一遍：计数 */
+	int n = 0;
+	for (int i = 0; i < max; i++) {
+		uintptr_t p;
+		if (copyin(pt, (char *)&p, uarray + i * 8, 8) < 0) return -EFAULT;
+		if (p == 0) break;
+		n++;
+	}
+	if (n == 0) { *out = NULL; return 0; }
+
+	/* 分配指针数组 */
+	*out = kmalloc(n * sizeof(char *));
+	if (!*out) return -ENOMEM;
+
+	/* 第二遍：复制每个字符串 */
+	for (int i = 0; i < n; i++) {
+		uintptr_t p;
+		copyin(pt, (char *)&p, uarray + i * 8, 8);
+		char buf[256];
+		ssize_t len = copyinstr(pt, buf, p, sizeof(buf));
+		if (len < 0) { len = 0; buf[0] = '\0'; }
+		(*out)[i] = kmalloc(len + 1);
+		if (!(*out)[i]) {
+			for (int j = 0; j < i; j++) kfree((*out)[j]);
+			kfree(*out); *out = NULL; return -ENOMEM;
+		}
+		memcpy((*out)[i], buf, len + 1);
+	}
+	return n;
+}
+
 uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 {
 	struct proc *p = curproc();
@@ -722,21 +788,80 @@ uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 		return -EFAULT;
 	/* 绝对路径用 root，相对路径用 CWD */
 	struct file *f = vfs_open_cwd(path, O_RDONLY, path[0] == '/' ? NULL : p->pwd);
-	if (IS_ERR(f))
+	if (IS_ERR(f)) {
 		return (uintptr_t)PTR_ERR(f);
+	}
 
-	/* 读取 ELF header */
-	elf64_ehdr_t ehdr;
-	loff_t pos = 0;
-	ssize_t n = file_read(f, &ehdr, sizeof(ehdr));
+	/* 读取头部（ELF 或 shebang 检测） */
+	char header[256];
+	ssize_t n = file_read(f, header, sizeof(header));
+
+	/* shebang (#!) 处理 */
+	char shebang_arg[128] = {0};
+	char shebang_script[256] = {0};
+	int is_shebang = 0;
+
+	if (n >= 2 && header[0] == '#' && header[1] == '!') {
+		char *cp = header + 2;
+		while (cp < header + n && (*cp == ' ' || *cp == '\t')) cp++;
+		if (cp >= header + n || *cp == '\n' || *cp == '\r') {
+			file_put(f);
+			return -ENOEXEC;
+		}
+		char interp[256] = {0};
+		int i = 0;
+		while (cp < header + n && *cp != ' ' && *cp != '\t'
+		       && *cp != '\n' && *cp != '\r' && i < 254)
+			interp[i++] = *cp++;
+		if (i == 0) {
+			file_put(f);
+			return -ENOEXEC;
+		}
+		/* 读取可选参数（最多一个） */
+		if (cp < header + n && (*cp == ' ' || *cp == '\t')) {
+			while (cp < header + n && (*cp == ' ' || *cp == '\t')) cp++;
+			i = 0;
+			while (cp < header + n && *cp != '\n' && *cp != '\r' && i < 126)
+				shebang_arg[i++] = *cp++;
+		}
+		memcpy(shebang_script, path, sizeof(shebang_script));
+		is_shebang = 1;
+
+		/* 关闭脚本，打开解释器 ELF */
+		file_put(f);
+		memcpy(path, interp, sizeof(interp));
+		f = vfs_open_cwd(path, O_RDONLY, path[0] == '/' ? NULL : p->pwd);
+		if (IS_ERR(f)) {
+			/* shebang 解释器不存在时回退到脚本所在目录 */
+			const char *bname = path;
+			const char *slash = strrchr(path, '/');
+			if (slash) bname = slash + 1;
+			slash = strrchr(shebang_script, '/');
+			if (slash) {
+				char fallback[256];
+				int n = snprintf(fallback, sizeof(fallback),
+						 "%.*s%s",
+						 (int)(slash - shebang_script + 1),
+						 shebang_script, bname);
+				if (n > 0 && (size_t)n < sizeof(fallback))
+					f = vfs_open_cwd(fallback, O_RDONLY, NULL);
+			}
+		}
+		if (IS_ERR(f))
+			return (uintptr_t)PTR_ERR(f);
+
+		n = file_read(f, header, sizeof(header));
+	}
 
 	/* 校验 ELF magic */
+	elf64_ehdr_t ehdr;
 	if (n < (ssize_t)sizeof(ehdr) ||
-	    ehdr.e_ident[0] != 0x7f || ehdr.e_ident[1] != 'E' ||
-	    ehdr.e_ident[2] != 'L' || ehdr.e_ident[3] != 'F') {
+	    header[0] != 0x7f || header[1] != 'E' ||
+	    header[2] != 'L' || header[3] != 'F') {
 		file_put(f);
 		return -ENOEXEC;
 	}
+	memcpy(&ehdr, header, sizeof(ehdr));
 
 	/* 校验架构：RISC-V = 0xF3 */
 	if (ehdr.e_machine != 0xF3) {
@@ -762,6 +887,44 @@ uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 		}
 	}
 
+	/* 从旧地址空间读取 argv / envp（释放前必须先复制到内核） */
+	char **saved_argv = NULL, **saved_envp = NULL;
+	int saved_argc = 0, saved_envc = 0;
+	{
+		if (!is_shebang) {
+			saved_argc = copyin_str_array(p->pagetable, argv, &saved_argv, 32);
+			if (saved_argc < 0) { file_put(f); return saved_argc; }
+		}
+		saved_envc = copyin_str_array(p->pagetable, envp, &saved_envp, 32);
+		if (saved_envc < 0) { file_put(f); return saved_envc; }
+	}
+
+	/* 预扫描 PT_TLS 段（在 file_put 之前读取段头和文件内容） */
+	uintptr_t tls_memsz = 0, tls_align = 1, tls_filesz = 0;
+	char *tls_file_data = NULL;
+	{
+		for (int i = 0; i < ehdr.e_phnum; i++) {
+			elf64_phdr_t phdr;
+			loff_t ph_pos = ehdr.e_phoff + i * ehdr.e_phentsize;
+			file_lseek(f, ph_pos, SEEK_SET);
+			if (file_read(f, &phdr, sizeof(phdr)) < (ssize_t)sizeof(phdr))
+				continue;
+			if (phdr.p_type == PT_TLS) {
+				tls_memsz = phdr.p_memsz;
+				tls_align = phdr.p_align ? phdr.p_align : 1;
+				tls_filesz = phdr.p_filesz;
+				if (tls_filesz > 0) {
+					tls_file_data = kmalloc(tls_filesz);
+					if (tls_file_data) {
+						file_lseek(f, phdr.p_offset, SEEK_SET);
+						file_read(f, tls_file_data, tls_filesz);
+					}
+				}
+				break;
+			}
+		}
+	}
+
 	/* 释放旧的用户空间映射（保留 trampoline 和 trapframe） */
 	uvm_free_user_pages(p->pagetable);
 	sfence_vma();
@@ -773,7 +936,7 @@ uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 	int rc = load_elf(f, p, &ehdr, 0, &entry, &phdr_addr, &phdr_num, &max_va);
 	if (rc != 0) {
 		file_put(f);
-		return rc;
+		execve_die(127);
 	}
 	file_put(f);
 
@@ -781,15 +944,22 @@ uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 	uintptr_t interp_entry = 0;
 	uintptr_t interp_base = 0;
 	if (interp_path[0] != '\0') {
-		/* 打开解释器 — 先试原始路径，再试 musl 回退路径 */
+		/* 打开解释器 - 先试原始路径，再试 musl 回退路径 */
 		struct file *interp_f = vfs_open_cwd(interp_path, O_RDONLY, NULL);
 		if (IS_ERR(interp_f)) {
-			/* 回退：sdcard-rv.img 没有 /lib/，用 /musl/lib/libc.so */
-			interp_f = vfs_open_cwd("/musl/lib/libc.so", O_RDONLY, NULL);
+			/* 回退：sdcard 布局将解释器放在 /glibc/lib/ 下 */
+			const char *base = interp_path;
+			const char *slash = strrchr(interp_path, '/');
+			if (slash) base = slash + 1;
+			char fallback[256];
+			int n = snprintf(fallback, sizeof(fallback),
+					 "/glibc/lib/%s", base);
+			if (n > 0 && (size_t)n < sizeof(fallback))
+				interp_f = vfs_open_cwd(fallback, O_RDONLY, NULL);
 		}
 		if (IS_ERR(interp_f)) {
 			warnf("sys_execve: cannot open interpreter '%s'", interp_path);
-			return -ENOEXEC;
+			execve_die(127);
 		}
 
 		/* 读取解释器 ELF header */
@@ -802,7 +972,7 @@ uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 		    interp_ehdr.e_ident[3] != 'F') {
 			file_put(interp_f);
 			warnf("sys_execve: interpreter not a valid ELF");
-			return -ENOEXEC;
+			execve_die(127);
 		}
 
 		uintptr_t interp_max_va = 0;
@@ -811,7 +981,7 @@ uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 		file_put(interp_f);
 		if (rc != 0) {
 			warnf("sys_execve: failed to load interpreter");
-			return rc;
+			execve_die(127);
 		}
 
 		interp_base = INTERP_BASE;
@@ -822,44 +992,110 @@ uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 	/* 设置 brk_end（主程序加载上限） */
 	p->brk_end = max_va;
 
+	/*
+	 * 初始化 TLS（Thread Local Storage）— glibc 静态/动态链接程序
+	 * 都需要 tp 指向有效的 TCB，否则 stack canary (tp+0x48) 会读到
+	 * 垃圾值，触发 __stack_chk_fail → SIGABRT。
+	 *
+	 * RISC-V TLS ABI: tp → TCB, TLS 变量在 tp 的负方向。
+	 * 布局: [TLS vars (memsz, aligned)] [TCB (TLS_TCB_SIZE)]
+	 * tp 指向 TCB 起始。
+	 */
+	uintptr_t tls_tcb = 0;
+	if (tls_memsz > 0) {
+#define TLS_TCB_SIZE 0x70
+		uintptr_t tls_total = PAGE_ALIGN_UP(tls_memsz + TLS_TCB_SIZE);
+		uintptr_t tls_base = USER_TOP - STACK_PAGES * PAGE_SIZE - tls_total;
+		uintptr_t tls_pa = (uintptr_t)kzalloc(tls_total);
+		if (tls_pa) {
+			if (mappages(p->pagetable, tls_base, tls_pa,
+				     tls_total / PAGE_SIZE,
+				     PTE_R | PTE_W | PTE_U) == 0) {
+				/* tdata 起始：TLS 区域中偏移 (tls_total - memsz - TCB_SIZE) */
+				uintptr_t tdata_start = tls_base + tls_total - tls_memsz - TLS_TCB_SIZE;
+				if (tls_file_data && tls_filesz > 0)
+					copyout(p->pagetable, tdata_start,
+						tls_file_data, tls_filesz);
+				/* tp 指向 TCB 起始，对齐到 tls_align */
+				uintptr_t tcb_addr = tls_base + tls_total - TLS_TCB_SIZE;
+				tcb_addr &= ~(tls_align - 1);
+				tls_tcb = tcb_addr;
+			} else {
+				kfree((void *)tls_pa);
+			}
+		}
+#undef TLS_TCB_SIZE
+	}
+
 	/* 分配用户栈（使用 walkaddr 检查是否已有映射） */
-	uintptr_t stack_bot = USER_TOP - PAGE_SIZE;
+	uintptr_t stack_bot = USER_TOP - STACK_PAGES * PAGE_SIZE;
 	if (walkaddr(p->pagetable, stack_bot) == 0) {
-		uintptr_t pa = (uintptr_t)kzalloc(PAGE_SIZE);
+		uintptr_t pa = (uintptr_t)kzalloc(STACK_PAGES * PAGE_SIZE);
 		if (!pa)
 			return -ENOMEM;
-		if (mappages(p->pagetable, stack_bot, pa, 1,
+		if (mappages(p->pagetable, stack_bot, pa, STACK_PAGES,
 			     PTE_R | PTE_W | PTE_U) != 0) {
 			kfree((void *)pa);
 			return -ENOMEM;
 		}
 	}
 
-	/* 设置用户栈：argv 字符串 + argc + argv + envp + auxv
-	 * 栈布局从高地址向低地址：
-	 *   [随机数据 16B] [auxv entries] [envp NULL] [argv ptrs] [argc]
-	 *   [argv[0] 字符串]
+	/* 决定 argv：shebang 用解释器 argv，否则用用户 argv */
+	int final_argc;
+	uintptr_t *argv_strs = NULL;	/* 内核堆上存放 argv 字符串地址 */
+	int max_argv = 0;
+	{
+		if (is_shebang) {
+			/* shebang argv = [path, arg?, script] */
+			final_argc = shebang_arg[0] ? 3 : 2;
+			argv_strs = kmalloc(final_argc * sizeof(uintptr_t));
+			if (!argv_strs) return -ENOMEM;
+			argv_strs[0] = (uintptr_t)path;	      /* interpreter path */
+			if (shebang_arg[0])
+				argv_strs[1] = (uintptr_t)shebang_arg;
+			argv_strs[final_argc - 1] = (uintptr_t)shebang_script;
+		} else {
+			final_argc = saved_argc;
+			argv_strs = kmalloc((final_argc + 1) * sizeof(uintptr_t));
+			if (!argv_strs) return -ENOMEM;
+			for (int i = 0; i < final_argc; i++)
+				argv_strs[i] = (uintptr_t)saved_argv[i];
+		}
+	}
+
+	/* 设置用户栈：
+	 * 布局 [低 sp -> 高 address]：
+	 *   argc | argv[]+NULL | envp[]+NULL | auxv[] | 随机16B | envp字符串 | argv字符串
 	 */
 	uintptr_t sp = USER_TOP;
 
-	/* 1) 写入 argv[0] 字符串（程序路径） */
-	{
-		int path_len = 0;
-		while (path[path_len]) path_len++;
-		sp -= path_len + 1;
-		if (copyout(p->pagetable, sp, path, path_len + 1) < 0)
-			return -ENOMEM;
+	/* 1) argv 字符串 + envp 字符串（从高地址向下放置） */
+	uintptr_t *arg_str_ptrs = kmalloc((final_argc + saved_envc) * sizeof(uintptr_t));
+	if (!arg_str_ptrs) { kfree(argv_strs); return -ENOMEM; }
+
+	for (int i = 0; i < final_argc; i++) {
+		const char *s = (const char *)argv_strs[i];
+		int len = 0; while (s[len]) len++;
+		sp -= len + 1;
+		if (copyout(p->pagetable, sp, (char *)s, len + 1) < 0)
+			{ kfree(argv_strs); kfree(arg_str_ptrs); return -ENOMEM; }
+		arg_str_ptrs[i] = sp;
 	}
-	uintptr_t arg0_str = sp;
+	for (int i = 0; i < saved_envc; i++) {
+		const char *s = saved_envp[i];
+		int len = 0; while (s[len]) len++;
+		sp -= len + 1;
+		if (copyout(p->pagetable, sp, (char *)s, len + 1) < 0)
+			{ kfree(argv_strs); kfree(arg_str_ptrs); return -ENOMEM; }
+		arg_str_ptrs[final_argc + i] = sp;
+	}
 
 	/* 2) 写入 16 字节随机数据（AT_RANDOM 指向此处） */
 	sp -= 16;
 	{
-		char rand_buf[16];
-		for (int i = 0; i < 16; i++)
-			rand_buf[i] = (char)((uintptr_t)&rand_buf * (i + 7) >> (i * 3)) & 0xff;
+		char rand_buf[16] = {0}; /* canary=0 避免 glibc 内部 amoswap 覆盖检测 */
 		if (copyout(p->pagetable, sp, rand_buf, 16) < 0)
-			return -ENOMEM;
+			{ kfree(argv_strs); kfree(arg_str_ptrs); return -ENOMEM; }
 	}
 	uintptr_t rand_addr = sp;
 
@@ -896,49 +1132,75 @@ uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 			u64 at_null_val[2] = { AT_NULL, 0 };
 			copyout(p->pagetable, apos, (char *)at_null_val, 16);
 		} else {
-			/* 静态链接：只需 AT_NULL */
-			sp -= 16;
-			aux_start = sp;
+			/* 静态链接：AT_PHDR + AT_PHNUM + AT_PHENT + AT_PAGESZ + AT_RANDOM */
+			sp -= 6 * 16;
+			(void)aux_start;
+			uintptr_t apos = sp;
+			u64 at_phdr_val[2] = { AT_PHDR, phdr_addr };
+			copyout(p->pagetable, apos, (char *)at_phdr_val, 16); apos += 16;
+			u64 at_phnum_val[2] = { AT_PHNUM, (u64)phdr_num };
+			copyout(p->pagetable, apos, (char *)at_phnum_val, 16); apos += 16;
+			u64 at_phent_val[2] = { AT_PHENT, (u64)sizeof(elf64_phdr_t) };
+			copyout(p->pagetable, apos, (char *)at_phent_val, 16); apos += 16;
+			u64 at_pagesz_val[2] = { AT_PAGESZ, PAGE_SIZE };
+			copyout(p->pagetable, apos, (char *)at_pagesz_val, 16); apos += 16;
+			u64 at_random_val[2] = { AT_RANDOM, rand_addr };
+			copyout(p->pagetable, apos, (char *)at_random_val, 16); apos += 16;
 			u64 at_null_val[2] = { AT_NULL, 0 };
-			copyout(p->pagetable, aux_start, (char *)at_null_val, 16);
+			copyout(p->pagetable, apos, (char *)at_null_val, 16);
 		}
 	}
 
-	/* 4) envp NULL */
+	/* 4) envp 指针数组 + NULL */
+	{
+		int envc = saved_envc;
+		sp -= (envc + 1) * 8;
+		uintptr_t apos = sp;
+		for (int i = 0; i < envc; i++) {
+			uintptr_t p_str = arg_str_ptrs[final_argc + i];
+			if (copyout(p->pagetable, apos, (char *)&p_str, 8) < 0)
+				{ kfree(argv_strs); kfree(arg_str_ptrs); return -ENOMEM; }
+			apos += 8;
+		}
+		{ u64 null_val = 0;
+		  copyout(p->pagetable, apos, (char *)&null_val, 8); }
+	}
+
+	/* 5) argv 指针数组 + NULL */
+	{
+		sp -= (final_argc + 1) * 8;
+		uintptr_t apos = sp;
+		for (int i = 0; i < final_argc; i++) {
+			if (copyout(p->pagetable, apos, (char *)&arg_str_ptrs[i], 8) < 0)
+				{ kfree(argv_strs); kfree(arg_str_ptrs); return -ENOMEM; }
+			apos += 8;
+		}
+		{ u64 null_val = 0;
+		  copyout(p->pagetable, apos, (char *)&null_val, 8); }
+	}
+
+	/* 6) argc */
 	sp -= 8;
 	{
-		u64 null_val = 0;
-		if (copyout(p->pagetable, sp, (char *)&null_val, 8) < 0)
-			return -ENOMEM;
+		u64 argc_val = final_argc;
+		if (copyout(p->pagetable, sp, (char *)&argc_val, 8) < 0)
+			{ kfree(argv_strs); kfree(arg_str_ptrs); return -ENOMEM; }
+		p->tf->a0 = final_argc;
 	}
 
-	/* 5) argv[0] pointer + argv NULL terminator */
-	sp -= 16;
-	if (copyout(p->pagetable, sp, (char *)&arg0_str, 8) < 0)
-		return -ENOMEM;
-	{
-		u64 null_val = 0;
-		if (copyout(p->pagetable, sp + 8, (char *)&null_val, 8) < 0)
-			return -ENOMEM;
-	}
+	kfree(argv_strs);
+	kfree(arg_str_ptrs);
 
-	/* 6) argc = 1 */
-	sp -= 8;
-	{
-		u64 argc = 1;
-		if (copyout(p->pagetable, sp, (char *)&argc, 8) < 0)
-			return -ENOMEM;
-	}
-
-	/* 设置 trapframe — 动态链接时跳转解释器，否则跳主程序 */
+	/* 设置 trapframe - 动态链接时跳转解释器，否则跳主程序 */
 	if (interp_path[0] != '\0') {
 		p->tf->epc = interp_entry; /* musl _dlstart */
 	} else {
 		p->tf->epc = entry;
 	}
 	p->tf->sp = sp; /* 指向栈上的 argc */
-	p->tf->a0 = 1; /* argc */
+	p->tf->tp = tls_tcb; /* TLS TCB（如有 PT_TLS，否则 0） */
 
+	kfree(tls_file_data);
 	return 0;
 }
 
@@ -1062,23 +1324,43 @@ uintptr_t sys_mmap(uintptr_t addr, size_t len, int prot, int flags, int fd, loff
 {
 	struct proc *p = curproc();
 
-	if (len == 0)
+	if (len == 0) {
 		goto fail;
+	}
 
 	int pte_flags = PTE_U;
 	if (prot & PROT_READ) pte_flags |= PTE_R;
 	if (prot & PROT_WRITE) pte_flags |= PTE_W;
 	if (prot & PROT_EXEC) pte_flags |= PTE_X;
-	if (pte_flags == PTE_U)
-		pte_flags = PTE_R | PTE_W | PTE_U;
-
 	size_t sz = PAGE_ALIGN_UP(len);
 	uintptr_t start;
 
-	if (flags & 0x20 /* MAP_FIXED */) {
+	if (flags & 0x10 /* MAP_FIXED */) {
 		start = addr;
+	} else if (addr != 0 && addr < USER_TOP - STACK_PAGES * PAGE_SIZE) {
+		/* 非 MAP_FIXED 时 addr 作为 hint：如果地址范围空闲则用，否则 fallback */
+		uintptr_t hint = PAGE_ALIGN_UP(addr);
+		int avail = 1;
+		for (uintptr_t a = hint; a < hint + sz; a += PAGE_SIZE) {
+			if (walkaddr(p->pagetable, a) != 0) { avail = 0; break; }
+		}
+		start = avail ? hint : PAGE_ALIGN_UP(p->brk_end ? p->brk_end : 0x10000);
 	} else {
 		start = PAGE_ALIGN_UP(p->brk_end ? p->brk_end : 0x10000);
+	}
+
+	/* PROT_NONE (prot=0): 不创建页表项，仅对 MAP_FIXED 解除已有映射 */
+	if (pte_flags == PTE_U) {
+		if (flags & 0x10) {
+			for (uintptr_t a = start; a < start + sz; a += PAGE_SIZE) {
+				uintptr_t old_pa = walkaddr(p->pagetable, a);
+				if (old_pa) {
+					unmappages(p->pagetable, a, 1);
+					kfree((void *)old_pa);
+				}
+			}
+		}
+		return start;
 	}
 
 	/* File-backed mmap */
@@ -1123,8 +1405,15 @@ uintptr_t sys_mmap(uintptr_t addr, size_t len, int prot, int flags, int fd, loff
 
 	/* Anonymous mmap */
 	for (uintptr_t a = start; a < start + sz; a += PAGE_SIZE) {
-		if (walkaddr(p->pagetable, a) != 0)
-			continue;
+		uintptr_t old_pa = walkaddr(p->pagetable, a);
+		if (old_pa != 0) {
+			if (flags & 0x10 /* MAP_FIXED */) {
+				unmappages(p->pagetable, a, 1);
+				kfree((void *)old_pa);
+			} else {
+				continue;
+			}
+		}
 		uintptr_t pa = (uintptr_t)kzalloc(PAGE_SIZE);
 		if (!pa)
 			return -ENOMEM;
@@ -1151,7 +1440,7 @@ uintptr_t sys_munmap(uintptr_t addr, size_t len)
 	/* 不允许 unmap TRAMPOLINE/TRAPFRAME/栈区域 */
 	if ((addr >= TRAMPOLINE && addr < TRAMPOLINE + PAGE_SIZE) ||
 	    (addr >= TRAPFRAME && addr < TRAPFRAME + PAGE_SIZE) ||
-	    (range_end > USER_TOP - PAGE_SIZE && addr < USER_TOP))
+	    (range_end > USER_TOP - STACK_PAGES * PAGE_SIZE && addr < USER_TOP))
 		return -EINVAL;
 	for (uintptr_t a = addr; a < range_end; a += PAGE_SIZE) {
 		uintptr_t pa = walkaddr(curproc()->pagetable, a);
@@ -1363,20 +1652,63 @@ uintptr_t sys_writev(uintptr_t fd, uintptr_t iov, uintptr_t iovcnt)
 
 uintptr_t sys_fcntl(uintptr_t fd, uintptr_t cmd, uintptr_t arg)
 {
-	/* stub: 大部分 fcntl 命令直接返回成功 */
-	(void)fd;
-	(void)cmd;
-	(void)arg;
+	struct proc *p = curproc();
+
+	if (cmd == 0 || cmd == 1030) {
+		/* F_DUPFD (0) / F_DUPFD_CLOEXEC (1030): dup to lowest >= arg */
+		int minfd = (int)arg;
+		if (minfd < 0) minfd = 0;
+
+		struct file *f = fd_get(p->fd_table, (int)fd);
+		if (!f) return -EBADF;
+
+		/* 找到 >= minfd 的最小空闲 fd */
+		struct fd_table *fdt = p->fd_table;
+		int newfd = -EMFILE;
+		spinlock_acquire(&fdt->lock);
+		for (u32 i = (u32)minfd; i < fdt->max_fds; i++) {
+			if (fdt->fds[i] == NULL) {
+				newfd = (int)i;
+				fdt->fds[i] = FD_RESERVED;
+				break;
+			}
+		}
+		spinlock_release(&fdt->lock);
+
+		if (newfd < 0) {
+			file_put(f);
+			return -EMFILE;
+		}
+
+		file_get(f);
+		if (fd_install(p->fd_table, newfd, f) < 0) {
+			file_put(f);
+			file_put(f);
+			return -EBADF;
+		}
+		file_put(f);
+		return newfd;
+	}
+
+	/* F_SETFD (2), F_GETFD (1), F_GETFL (3) — stub, return success */
 	return 0;
 }
 
 uintptr_t sys_ioctl(uintptr_t fd, uintptr_t request, uintptr_t arg)
 {
-	/* stub: 终端 ioctl 暂不实现 */
-	(void)fd;
-	(void)request;
+	struct proc *p = curproc();
 	(void)arg;
-	return 0;
+
+	switch (request) {
+	case 0x5401: /* TIOCSWINSZ: set window size — ignore */
+	case 0x5402: /* TIOCGWINSZ: get window size — stub */
+		return 0;
+	case 0x540f: /* TCGETS: get terminal attrs — not a terminal */
+	case 0x5413: /* TIOCGPGRP: get pgrp — not a terminal */
+		return -ENOTTY;
+	default:
+		return -ENOTTY;
+	}
 }
 
 /* ============================================================
@@ -1432,6 +1764,15 @@ uintptr_t sys_rt_sigprocmask(int how, uintptr_t set, uintptr_t oset, size_t sigs
 	return 0;
 }
 
+/* symlinkat stub - 返回 0 让 busybox 可继续运行 */
+uintptr_t sys_symlinkat(uintptr_t target, int dirfd, uintptr_t linkpath)
+{
+	(void)target;
+	(void)dirfd;
+	(void)linkpath;
+	return 0;
+}
+
 /* ============================================================
  * Misc: uname
  * ============================================================ */
@@ -1450,7 +1791,7 @@ uintptr_t sys_uname(uintptr_t buf)
 	struct utsname u;
 	strcpy(u.sysname, "NoobKernel");
 	strcpy(u.nodename, "qemu");
-	strcpy(u.release, "1.0.0");
+	strcpy(u.release, "6.1.0");
 	strcpy(u.version, "Yu-NoobKernel riscv64");
 	strcpy(u.machine, "riscv64");
 	strcpy(u.domainname, "");
@@ -1508,8 +1849,8 @@ uintptr_t sys_chdir(uintptr_t pathname)
 	if (copyinstr(p->pagetable, path, pathname, sizeof(path)) < 0)
 		return -EFAULT;
 
-	struct dentry *dentry = vfs_path_lookup(path[0] == '/' ? 
-										NULL : p->pwd, path, LOOKUP_FOLLOW);
+	struct dentry *dentry = vfs_path_lookup(path[0] == '/' ?
+						NULL : p->pwd, path, LOOKUP_FOLLOW);
 	if (IS_ERR(dentry) || !dentry)
 		return dentry ? PTR_ERR(dentry) : -ENOENT;
 
@@ -1791,7 +2132,7 @@ uintptr_t sys_nanosleep(uintptr_t req, uintptr_t rem)
 	u64 end = start + ns_to_cputime(ns);
 
 	while (r_time() < end) {
-		/* busy-wait: 单核 QEMU 环境下简单实现 */
+		/* busy-wait */
 	}
 
 	if (rem)
@@ -1824,6 +2165,129 @@ uintptr_t sys_sched_yield(void)
 {
 	sched_yield();
 	return 0;
+}
+
+/* ppoll stub — 返回 0 (无事件)，让 busybox 等不堵塞 */
+uintptr_t sys_ppoll(uintptr_t fds, uintptr_t nfds, uintptr_t tsp, uintptr_t sigmask)
+{
+	(void)fds;
+	(void)nfds;
+	(void)tsp;
+	(void)sigmask;
+	return 0;
+}
+
+/* ============================================================
+ * 进程/线程信息：gettid, geteuid, tgkill, kill
+ * ============================================================ */
+
+uintptr_t sys_gettid(void)
+{
+	return curproc()->pid;
+}
+
+uintptr_t sys_geteuid(void)
+{
+	return 0; /* root */
+}
+
+uintptr_t sys_getegid(void)
+{
+	return 0;
+}
+
+uintptr_t sys_getgid(void)
+{
+	return 0;
+}
+
+uintptr_t sys_getpgid(int pid)
+{
+	if (pid == 0)
+		return curproc()->pid;
+	return 0;
+}
+
+uintptr_t sys_getsid(int pid)
+{
+	if (pid == 0)
+		return curproc()->pid;
+	return 0;
+}
+
+uintptr_t sys_tgkill(int tgid, int tid, int sig)
+{
+	(void)tgid;
+	(void)tid;
+	/* 如果目标是当前进程且信号是 SIGABRT(6)，直接 exit */
+	if (sig == 6) {
+		struct proc *p = curproc();
+		p->exit_code = -sig;
+		p->state = PROC_ZOMBIE;
+		if (p->parent)
+			wait_queue_wakeup_one(&p->parent->child_wait);
+		sched_yield();
+		panic("unreachable");
+	}
+	return 0;
+}
+
+uintptr_t sys_kill(int pid, int sig)
+{
+	(void)pid;
+	(void)sig;
+	return 0;
+}
+
+/* ============================================================
+ * FS 辅助：faccessat, readlinkat, sendfile
+ * ============================================================ */
+
+uintptr_t sys_faccessat(int dirfd, uintptr_t pathname, int mode, uintptr_t flags)
+{
+	(void)dirfd;
+	(void)pathname;
+	(void)mode;
+	(void)flags;
+	return 0; /* 允许所有访问 */
+}
+
+uintptr_t sys_readlinkat(int dirfd, uintptr_t pathname, uintptr_t buf, uintptr_t bufsiz)
+{
+	(void)dirfd;
+	(void)pathname;
+	(void)buf;
+	(void)bufsiz;
+	return -ENOENT; /* 没有符号链接 */
+}
+
+uintptr_t sys_sendfile(int out_fd, int in_fd, uintptr_t offset, uintptr_t count)
+{
+	(void)out_fd;
+	(void)in_fd;
+	(void)offset;
+	(void)count;
+	return -EINVAL;
+}
+
+/* ============================================================
+ * 资源管理：set_robust_list, prlimit64
+ * ============================================================ */
+
+uintptr_t sys_set_robust_list(uintptr_t head, uintptr_t len)
+{
+	(void)head;
+	(void)len;
+	return 0;
+}
+
+uintptr_t sys_prlimit64(int pid, int resource, uintptr_t new_limit, uintptr_t old_limit)
+{
+	(void)pid;
+	(void)resource;
+	(void)new_limit;
+	(void)old_limit;
+	return -ENOSYS;
 }
 
 /* ============================================================
@@ -1864,7 +2328,7 @@ void syscall_init(void)
 	syscall_register(SYS_openat,      (syscall_fn_t)sys_openat);
 	syscall_register(SYS_getdents64,  (syscall_fn_t)sys_getdents);
 
-	/* 进程管理 — fork/clone 共用 SYS_clone (220)，由 child_stack==0 区分 */
+	/* 进程管理 - fork/clone 共用 SYS_clone (220)，由 child_stack==0 区分 */
 	syscall_register(SYS_clone,       (syscall_fn_t)sys_clone);
 	syscall_register(SYS_execve,      (syscall_fn_t)sys_execve);
 	syscall_register(SYS_wait4,       (syscall_fn_t)sys_wait4);
@@ -1893,6 +2357,7 @@ void syscall_init(void)
 	/* 文件系统 */
 	syscall_register(SYS_mkdirat,     (syscall_fn_t)sys_mkdirat);
 	syscall_register(SYS_unlinkat,    (syscall_fn_t)sys_unlinkat);
+	syscall_register(SYS_symlinkat,   (syscall_fn_t)sys_symlinkat);
 	syscall_register(SYS_getcwd,      (syscall_fn_t)sys_getcwd);
 	syscall_register(SYS_chdir,       (syscall_fn_t)sys_chdir);
 	syscall_register(SYS_fstat,       (syscall_fn_t)sys_fstat);
@@ -1911,6 +2376,22 @@ void syscall_init(void)
 	syscall_register(SYS_times,        (syscall_fn_t)sys_times);
 	syscall_register(SYS_sched_yield, (syscall_fn_t)sys_sched_yield);
 	syscall_register(SYS_getrandom, (syscall_fn_t)sys_getrandom);
+	syscall_register(SYS_ppoll, (syscall_fn_t)sys_ppoll);
+
+	/* 新增的 glibc/compat stub */
+	syscall_register(SYS_gettid,       (syscall_fn_t)sys_gettid);
+	syscall_register(SYS_geteuid,      (syscall_fn_t)sys_geteuid);
+	syscall_register(SYS_getegid,      (syscall_fn_t)sys_getegid);
+	syscall_register(SYS_getgid,       (syscall_fn_t)sys_getgid);
+	syscall_register(SYS_getpgid,      (syscall_fn_t)sys_getpgid);
+	syscall_register(SYS_getsid,       (syscall_fn_t)sys_getsid);
+	syscall_register(SYS_tgkill,       (syscall_fn_t)sys_tgkill);
+	syscall_register(SYS_kill,         (syscall_fn_t)sys_kill);
+	syscall_register(SYS_faccessat,    (syscall_fn_t)sys_faccessat);
+	syscall_register(SYS_readlinkat,   (syscall_fn_t)sys_readlinkat);
+	syscall_register(SYS_sendfile,     (syscall_fn_t)sys_sendfile);
+	syscall_register(SYS_set_robust_list, (syscall_fn_t)sys_set_robust_list);
+	syscall_register(SYS_prlimit64,    (syscall_fn_t)sys_prlimit64);
 
 	/* 自定义 */
 	syscall_register(SYS_shutdown,    (syscall_fn_t)sys_shutdown);

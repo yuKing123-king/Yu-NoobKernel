@@ -165,6 +165,7 @@ struct ext4_sb_info {
 	u32 inodes_per_block;
 	u32 groups_count;
 	u32 desc_per_block;
+	u32 desc_size;               /* on-disk descriptor size: 32 or 64 */
 	dev_t dev;
 };
 

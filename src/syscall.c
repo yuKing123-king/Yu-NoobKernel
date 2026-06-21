@@ -138,7 +138,6 @@ uintptr_t sys_read(int fd, uintptr_t buf, size_t len)
 uintptr_t sys_exit(int status)
 {
 	struct proc *p = curproc();
-	infof("Process %d (%s) exited with status %d", p->pid, p->comm, status);
 	p->exit_code = status;
 	p->state = PROC_ZOMBIE;
 	if (p->parent)
