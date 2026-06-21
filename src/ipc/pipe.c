@@ -31,7 +31,7 @@ static struct pipe *get_pipe(struct file *f)
 
 static int pipe_is_read_end(struct file *f)
 {
-	return f->f_mode & O_RDONLY;
+	return f->f_flags & O_RDONLY;
 }
 
 ssize_t pipe_read(struct file *f, void *ubuf, size_t count, loff_t *pos)
@@ -53,8 +53,7 @@ ssize_t pipe_read(struct file *f, void *ubuf, size_t count, loff_t *pos)
 			spinlock_release(&p->lock);
 			return 0;
 		}
-		spinlock_release(&p->lock);
-		wait_queue_sleep(&p->rq, cur);
+		wait_queue_sleep_locked(&p->rq, cur, &p->lock);
 	}
 
 	while (total < (int)count) {
@@ -102,8 +101,7 @@ ssize_t pipe_write(struct file *f, const void *ubuf, size_t count, loff_t *pos)
 				spinlock_release(&p->lock);
 				return -EPIPE;
 			}
-			spinlock_release(&p->lock);
-			wait_queue_sleep(&p->wq, cur);
+			wait_queue_sleep_locked(&p->wq, cur, &p->lock);
 			spinlock_acquire(&p->lock);
 			if (p->count == PIPE_SIZE && p->nreaders == 0) {
 				spinlock_release(&p->lock);

@@ -15,3 +15,4 @@ void wait_queue_init(struct wait_queue *wq);
 void wait_queue_sleep(struct wait_queue *wq, struct proc *p);
 void wait_queue_wakeup_one(struct wait_queue *wq);
 void wait_queue_wakeup_all(struct wait_queue *wq);
+void wait_queue_sleep_locked(struct wait_queue *wq, struct proc *p, void *lock);

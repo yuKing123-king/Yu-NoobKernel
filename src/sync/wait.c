@@ -51,3 +51,19 @@ void wait_queue_wakeup_all(struct wait_queue *wq)
 {
 	wait_queue_wakeup(wq, 1);
 }
+
+/*
+ * 原子地将进程挂到等待队列，然后释放外部锁再让出 CPU。
+ * 调用者必须已持有 lock，本函数负责释放它。
+ * 这消除了 "释放锁 → sleep" 之间的竞态窗口。
+ */
+void wait_queue_sleep_locked(struct wait_queue *wq, struct proc *p, void *lock)
+{
+	spinlock_acquire(&wq->lock);
+	list_add_tail(&p->runq, &wq->list);
+	p->state = PROC_SLEEPING;
+	spinlock_release(&wq->lock);
+
+	spinlock_release((spinlock_t *)lock);
+	sched_yield();
+}
