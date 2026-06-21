@@ -49,8 +49,6 @@ void bcache_init(void)
 	}
 
 	spinlock_release(&bcache.lock);
-	infof("bcache initialized: %d buffers, %d hash buckets", BCACHE_SIZE,
-	      BCACHE_HASH_SIZE);
 }
 
 /*

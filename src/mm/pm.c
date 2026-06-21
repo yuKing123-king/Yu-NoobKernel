@@ -161,9 +161,6 @@ int pm_init()
 	if (ret)
 		return ret;
 
-	infof("Free Pages: %zu, Usage: %u%%", get_free_pages_num(),
-	      100 - get_free_pages_num() * 100ULL / PAGE_NUM);
-
 	return 0;
 }
 

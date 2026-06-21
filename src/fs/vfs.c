@@ -30,7 +30,6 @@ void vfs_init(void)
 	dentry_init();
 	file_init();
 
-	infof("vfs initialized");
 }
 
 /*
@@ -61,7 +60,6 @@ int register_filesystem(struct file_system_type *fs)
 
 	spinlock_release(&vfs_state.lock);
 
-	infof("filesystem '%s' registered", fs->name);
 	return 0;
 }
 
@@ -96,7 +94,6 @@ int unregister_filesystem(struct file_system_type *fs)
 	list_del(&fs->fs_list);
 	spinlock_release(&vfs_state.lock);
 
-	infof("filesystem '%s' unregistered", fs->name);
 	return 0;
 }
 
@@ -205,7 +202,6 @@ int vfs_mount_root(struct file_system_type *fs_type, dev_t dev)
 	list_add(&mnt->mnt_child, &vfs_state.mount_list);
 	spinlock_release(&vfs_state.lock);
 
-	infof("root filesystem mounted");
 	return 0;
 }
 

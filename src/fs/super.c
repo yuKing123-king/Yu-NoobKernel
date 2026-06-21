@@ -29,7 +29,6 @@ void super_init(void)
 	super_state.lock = SPINLOCK_INITIALIZER("super");
 	super_state.count = 0;
 
-	infof("superblock initialized");
 }
 
 /*

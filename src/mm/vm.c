@@ -101,5 +101,4 @@ void kvminit()
 
 	w_satp(MAKE_SATP(kpagetable));
 	sfence_vma();
-	infof("enable pageing at %p", r_satp());
 }

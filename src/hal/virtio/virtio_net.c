@@ -122,10 +122,6 @@ static int virtio_net_init_one(uintptr_t mmio_addr, u32 irqno)
 
 	net_dev = dev;
 
-	infof("virtio_net_init: device ready, mac=%02x:%02x:%02x:%02x:%02x:%02x",
-	      dev->mac[0], dev->mac[1], dev->mac[2],
-	      dev->mac[3], dev->mac[4], dev->mac[5]);
-
 	return 0;
 }
 

@@ -334,21 +334,10 @@ void buddy_test(void)
 		void *addr[20];
 		for (int i = 0; i < 20; i++) {
 			addr[i] = buddy_alloc(PAGE_SIZE << order);
-			if (addr[i] == NULL) {
-				infof(
-				    "%d: Failed to allocate block of order %d",
-				    i, order);
-			} else {
-				infof("%d: Allocated block of order %d at "
-				      "address %p",
-				      i, order, addr[i]);
-			}
 		}
 		for (int i = 0; i < 20; i++) {
 			if (addr[i] != NULL) {
 				buddy_free(addr[i]);
-				infof("%d: Freed block at address %p", i,
-				      addr[i]);
 			}
 		}
 	}

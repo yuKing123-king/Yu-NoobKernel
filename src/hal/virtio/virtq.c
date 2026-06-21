@@ -81,9 +81,6 @@ struct virtq *virtq_create(struct virtio_mmio_regs *regs, u16 queue_idx,
 	vq->used->flags = 0;
 	vq->used->idx = 0;
 
-	infof("virtq created: num=%d, descs=%p, avail=%p, used=%p", num,
-	      vq->descs, vq->avail, vq->used);
-
 	return vq;
 }
 

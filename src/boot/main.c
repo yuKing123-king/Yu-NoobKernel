@@ -192,7 +192,6 @@ void main(u64 hartid, void *_)
 	if (hartid == 0) {
 		clear_bss();
 		init_cpu(hartid);
-		infof("Hello world on cpu: %d", r_tp());
 		print_pm_layout();
 		if (pm_init())
 			panic("pm_init failed");
@@ -217,20 +216,13 @@ void main(u64 hartid, void *_)
 			dev_t root_dev = MKDEV(BLK_MAJOR_VIRTIO, 0);
 			if (vfs_mount_root(get_fs("ext4"), root_dev) != 0)
 				warnf("ext4: failed to mount root");
-			else
-				infof("ext4: root filesystem mounted");
 		}
 
-
-		infof("creating init process...");
 		struct proc *init_proc = create_init_process();
-		infof("init proc created, pid=%d", init_proc->pid);
 		enqueue_proc(r_tp(), init_proc);
 
 		sched_enabled = true;
-		infof("switching to idle");
 		context_switch_to(&thiscpu()->idle.ctx);
-		infof("switching to init process...");
 		sched_yield();
 	}
 	while (1) {

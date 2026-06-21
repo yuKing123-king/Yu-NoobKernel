@@ -105,8 +105,6 @@ int virtio_mmio_probe(struct virtio_mmio_regs *regs, u32 irqno)
 		return -1;
 	}
 
-	infof("virtio_mmio: found device id=%d, vendor=%x", device_id,
-	      vendor_id);
 	return 0;
 }
 
@@ -137,8 +135,6 @@ int virtio_mmio_init(struct virtio_device *dev)
 	dev->vendor_id = virtio_read_reg(dev, VIRTIO_REG_VENDOR_ID);
 	dev->version = virtio_read_reg(dev, VIRTIO_REG_VERSION);
 
-	infof("virtio_mmio_init: device initialized, id=%d, version=%d",
-	      dev->device_id, dev->version);
 	return 0;
 }
 
@@ -150,7 +146,7 @@ int virtio_mmio_init(struct virtio_device *dev)
  * @return: 成功返回0，失败返回-1
  */
 int virtio_negotiate_features(struct virtio_device *dev, u32 required,
-			      u32 rejected)
+				      u32 rejected)
 {
 	u32 device_features = virtio_read_reg(dev, VIRTIO_REG_DEVICE_FEATURES);
 
@@ -171,7 +167,6 @@ int virtio_negotiate_features(struct virtio_device *dev, u32 required,
 		return -1;
 	}
 
-	infof("virtio_negotiate_features: negotiated=%x", driver_features);
 	return 0;
 }
 
@@ -193,11 +188,8 @@ int virtio_setup_vq(struct virtio_device *dev, u32 vq_idx, u16 num)
 	mb();
 
 	u32 max = virtio_read_reg(dev, VIRTIO_REG_QUEUE_NUM_MAX);
-	if (num > max) {
-		warnf("virtio_setup_vq: requested %d > max %d, using max", num,
-		      max);
+	if (num > max)
 		num = max;
-	}
 
 	if (num == 0) {
 		errorf("virtio_setup_vq: queue %d not available", vq_idx);
@@ -251,9 +243,6 @@ int virtio_setup_vq(struct virtio_device *dev, u32 vq_idx, u16 num)
 	dev->vqs[vq_idx] = vq;
 	dev->num_vqs++;
 
-	infof(
-	    "virtio_setup_vq: vq %d ready, num=%d, desc=%p, avail=%p, used=%p",
-	    vq_idx, num, vq->descs, vq->avail, vq->used);
 	return 0;
 }
 

@@ -144,10 +144,8 @@ static int virtio_blk_rw_internal(struct block_device *dev, u64 sector,
 	}
 
 	int ret = 0;
-	if (req->status != VIRTIO_BLK_S_OK) {
-		warnf("virtio_blk_rw: status=%d", req->status);
+	if (req->status != VIRTIO_BLK_S_OK)
 		ret = -1;
-	}
 
 	kfree(req);
 	return ret;
@@ -290,10 +288,6 @@ static int virtio_blk_init_one(uintptr_t mmio_addr, u32 irqno, int minor)
 	virtio_blks[minor] = blk;
 	virtio_blk_count++;
 
-	infof("virtio_blk_init: device %d ready, capacity=%llu sectors, "
-	      "block_size=%d, irqno=%d",
-	      minor, blk->capacity, blk->block_size, irqno);
-
 	return 0;
 }
 
@@ -332,6 +326,5 @@ int virtio_blk_init_all(void)
 		/* 非 DISK 设备（如网络设备）跳过，后续扩展 */
 	}
 
-	infof("virtio_blk_init_all: %d block device(s) initialized", count);
 	return count;
 }

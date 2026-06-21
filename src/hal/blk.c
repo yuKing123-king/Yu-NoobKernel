@@ -54,8 +54,6 @@ int blk_register(struct block_device *dev)
 
 	spinlock_release(&blk_registry.lock);
 
-	infof("blk_register: device %d:%d (%s) registered", major, minor,
-	      dev->name);
 	return 0;
 }
 

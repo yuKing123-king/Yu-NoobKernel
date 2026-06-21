@@ -34,7 +34,6 @@ void inode_init(void)
 	inode_state.lock = SPINLOCK_INITIALIZER("inode");
 	inode_state.count = 0;
 
-	infof("inode initialized");
 }
 
 /*

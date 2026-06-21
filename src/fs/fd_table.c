@@ -8,7 +8,7 @@
 /*
  * 初始化文件描述符表子系统
  */
-void fd_table_init(void) { infof("fd_table initialized"); }
+void fd_table_init(void) {}
 
 /*
  * 分配并初始化一个新的文件描述符表

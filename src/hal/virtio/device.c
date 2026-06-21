@@ -18,6 +18,5 @@ int virtio_init(void)
 		warnf("virtio_init: no net device found");
 	}
 
-	infof("virtio_init: all devices initialized");
 	return 0;
 }

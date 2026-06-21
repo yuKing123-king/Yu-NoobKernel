@@ -127,7 +127,6 @@ void kfree(void *addr)
 {
 	struct page *page = addr2page((void *)PAGE_ALIGN_DOWN((uintptr_t)addr));
 	if (page == NULL) {
-		warnf("trying free an invalid ptr: %p", addr);
 		return;
 	}
 

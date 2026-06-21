@@ -29,7 +29,6 @@ void file_init(void)
 	file_state.lock = SPINLOCK_INITIALIZER("file");
 	file_state.count = 0;
 
-	infof("file initialized");
 }
 
 /*

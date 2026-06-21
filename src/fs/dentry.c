@@ -54,7 +54,6 @@ void dentry_init(void)
 	dentry_state.lock = SPINLOCK_INITIALIZER("dentry");
 	dentry_state.count = 0;
 
-	infof("dentry initialized");
 }
 
 /*

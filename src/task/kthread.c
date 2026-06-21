@@ -72,7 +72,6 @@ void kthread_exit(int ret_code)
 	if (!p)
 		panic("kthread_exit: no current proc");
 
-	infof("kthread %s exited with code %d", p->comm, ret_code);
 	// 1. 从 runqueue 中移除（如果还在）
 	// 但通常线程退出时不在 runqueue（正在运行）
 	// 所以直接标记状态
