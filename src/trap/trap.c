@@ -108,7 +108,7 @@ int trap_init()
 {
 	set_kerneltrap();
 	w_sie(r_sie() | SIE_SEIE | SIE_STIE | SIE_SSIE);
-	w_sstatus(r_sstatus() | SSTATUS_SIE);
+	w_sstatus(r_sstatus() | SSTATUS_SIE | SSTATUS_FS_INIT);
 	return 0;
 }
 
@@ -185,10 +185,6 @@ void usertrap(void)
 	struct proc *p = thiscpu()->proc;
 
 	if ((scause & (1UL << 63)) == 0) {
-		if (scause == 2 || scause == 15 || scause == 13 || scause == 12) {
-			infof("usertrap: page fault scause=%lx sepc=%lx stval=%lx pid=%d",
-			      scause, r_sepc(), r_stval(), p->pid);
-		}
 		switch (scause) {
 		case UserEnvCall:
 			p->tf->epc += 4;
@@ -229,7 +225,7 @@ void usertrapret(struct proc *p)
 	intr_off();
 
 	w_stvec(TRAMPOLINE + ((uintptr_t)uservec - (uintptr_t)trampoline));
-	
+
 	p->tf->kernel_satp = MAKE_SATP(kpagetable);
 	p->tf->kernel_sp = (uintptr_t)p->kstack + KSTACK_SIZE;
 	p->tf->kernel_trap = (uintptr_t)usertrap;
@@ -238,6 +234,7 @@ void usertrapret(struct proc *p)
 	uintptr_t sstatus = r_sstatus();
 	sstatus &= ~SSTATUS_SPP;
 	sstatus |= SSTATUS_SPIE;
+	sstatus |= SSTATUS_FS_INIT;  /* 启用用户态 FPU */
 	w_sstatus(sstatus);
 
 	w_sepc(p->tf->epc);

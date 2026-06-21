@@ -35,6 +35,21 @@ struct context {
 
 	// CSR
 	u64 sstatus;
+
+	// FPU callee-saved (fs0-fs11 + fcsr)
+	u64 fs0;
+	u64 fs1;
+	u64 fs2;
+	u64 fs3;
+	u64 fs4;
+	u64 fs5;
+	u64 fs6;
+	u64 fs7;
+	u64 fs8;
+	u64 fs9;
+	u64 fs10;
+	u64 fs11;
+	u64 fcsr;
 };
 
 struct ktrapframe {
