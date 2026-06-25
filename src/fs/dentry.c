@@ -121,17 +121,29 @@ void dentry_free(struct dentry *dentry)
 	}
 
 	spinlock_acquire(&dentry_state.lock);
-	hashtable_delete(&dentry_state.ht,
-			 (void *)(uintptr_t)dentry_hash_key(
-			     dentry->d_sb, dentry->d_parent, &dentry->d_name));
-	list_del(&dentry->d_list);
-	list_del(&dentry->d_lru);
-	dentry_state.count--;
+	if (!(dentry->d_flags & DCACHE_UNHASHED)) {
+		hashtable_delete(&dentry_state.ht,
+				 (void *)(uintptr_t)dentry_hash_key(
+				     dentry->d_sb, dentry->d_parent, &dentry->d_name));
+		if (!list_empty(&dentry->d_list)) {
+			list_del(&dentry->d_list);
+			INIT_LIST_HEAD(&dentry->d_list);
+		}
+		dentry->d_flags |= DCACHE_UNHASHED;
+		dentry_state.count--;
+	}
+	if (!list_empty(&dentry->d_lru)) {
+		list_del(&dentry->d_lru);
+		INIT_LIST_HEAD(&dentry->d_lru);
+	}
 	spinlock_release(&dentry_state.lock);
 
 	if (dentry->d_parent && dentry->d_parent != dentry) {
 		spinlock_acquire(&dentry->d_parent->d_lock);
-		list_del(&dentry->d_sibling);
+		if (!list_empty(&dentry->d_sibling)) {
+			list_del(&dentry->d_sibling);
+			INIT_LIST_HEAD(&dentry->d_sibling);
+		}
 		spinlock_release(&dentry->d_parent->d_lock);
 	}
 
@@ -195,8 +207,14 @@ void dentry_put(struct dentry *dentry)
 	if (dentry->d_refcnt == 0) {
 		spinlock_release(&dentry->d_lock);
 
+		if (dentry->d_flags & DCACHE_UNHASHED) {
+			dentry_free(dentry);
+			return;
+		}
+
 		spinlock_acquire(&dentry_state.lock);
-		list_add(&dentry->d_lru, &dentry_state.dentry_lru);
+		if (list_empty(&dentry->d_lru))
+			list_add(&dentry->d_lru, &dentry_state.dentry_lru);
 		spinlock_release(&dentry_state.lock);
 		return;
 	}
@@ -288,7 +306,33 @@ void dentry_delete(struct dentry *dentry)
 		}
 	}
 
-	dentry_free(dentry);
+	spinlock_acquire(&dentry_state.lock);
+	if (!(dentry->d_flags & DCACHE_UNHASHED)) {
+		hashtable_delete(&dentry_state.ht,
+				 (void *)(uintptr_t)dentry_hash_key(
+				     dentry->d_sb, dentry->d_parent, &dentry->d_name));
+		if (!list_empty(&dentry->d_list)) {
+			list_del(&dentry->d_list);
+			INIT_LIST_HEAD(&dentry->d_list);
+		}
+		dentry->d_flags |= DCACHE_UNHASHED;
+		dentry_state.count--;
+	}
+	if (!list_empty(&dentry->d_lru)) {
+		list_del(&dentry->d_lru);
+		INIT_LIST_HEAD(&dentry->d_lru);
+	}
+	spinlock_release(&dentry_state.lock);
+
+	if (dentry->d_parent && dentry->d_parent != dentry) {
+		spinlock_acquire(&dentry->d_parent->d_lock);
+		if (!list_empty(&dentry->d_sibling))
+			list_del(&dentry->d_sibling);
+		INIT_LIST_HEAD(&dentry->d_sibling);
+		spinlock_release(&dentry->d_parent->d_lock);
+	}
+
+	dentry_put(dentry);
 }
 
 /*

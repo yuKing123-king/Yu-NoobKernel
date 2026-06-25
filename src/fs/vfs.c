@@ -655,6 +655,12 @@ int vfs_mkdir_cwd(const char *path, umode_t mode, struct dentry *base)
 		return -EINVAL;
 	}
 
+	struct dentry *existing = vfs_path_lookup(base, path, LOOKUP_FOLLOW);
+	if (!IS_ERR(existing)) {
+		dentry_put(existing);
+		return -EEXIST;
+	}
+
 	struct path parent;
 	struct qstr last;
 	int ret = vfs_path_parent(base, path, &parent, &last);
@@ -709,11 +715,16 @@ int vfs_mkdir_cwd(const char *path, umode_t mode, struct dentry *base)
  */
 int vfs_rmdir(const char *path)
 {
+	return vfs_rmdir_cwd(path, NULL);
+}
+
+int vfs_rmdir_cwd(const char *path, struct dentry *base)
+{
 	if (!path) {
 		return -EINVAL;
 	}
 
-	struct dentry *dentry = vfs_path_lookup(NULL, path, LOOKUP_FOLLOW);
+	struct dentry *dentry = vfs_path_lookup(base, path, LOOKUP_FOLLOW);
 	if (IS_ERR(dentry)) {
 		return PTR_ERR(dentry);
 	}
@@ -808,6 +819,12 @@ int vfs_create(const char *path, umode_t mode)
 {
 	if (!path) {
 		return -EINVAL;
+	}
+
+	struct dentry *existing = vfs_path_lookup(NULL, path, LOOKUP_FOLLOW);
+	if (!IS_ERR(existing)) {
+		dentry_put(existing);
+		return -EEXIST;
 	}
 
 	struct path parent;

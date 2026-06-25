@@ -592,9 +592,13 @@ static u32 ext4_dir_lookup(struct super_block *sb,
 	u64 offset = 0;
 	while (offset < dir_size) {
 		struct ext4_dirent *de = (struct ext4_dirent *)(buf + offset);
-		if (de->inode == 0 || de->rec_len == 0)
+		if (de->rec_len == 0)
 			break;
 
+		if (de->inode == 0) {
+			offset += de->rec_len;
+			continue;
+		}
 
 		if (de->name_len == (u8)namelen &&
 		    memcmp(de->name, name, namelen) == 0) {
@@ -661,7 +665,8 @@ static int ext4_statfs(struct super_block *sb)
 	struct ext4_sb_info *sbi = ext4_get_sbi(sb);
 	if (!sbi)
 		return -EIO;
-	/* Just log info for now */
+
+	sb->s_blocksize = sbi->block_size;
 	return 0;
 }
 
@@ -681,6 +686,7 @@ static loff_t ext4_llseek(struct file *file, loff_t offset, int whence);
 static int ext4_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode);
 static int ext4_create(struct inode *dir, struct dentry *dentry, umode_t mode);
 static int ext4_unlink(struct inode *dir, struct dentry *dentry);
+static int ext4_rmdir(struct inode *dir, struct dentry *dentry);
 
 struct super_operations ext4_super_ops = {
 	.alloc_inode   = ext4_alloc_inode,
@@ -695,6 +701,7 @@ struct inode_operations ext4_dir_inode_ops = {
 	.mkdir  = ext4_mkdir,
 	.create = ext4_create,
 	.unlink = ext4_unlink,
+	.rmdir  = ext4_rmdir,
 };
 
 struct file_operations ext4_file_operations = {
@@ -1025,18 +1032,20 @@ static int ext4_unlink(struct inode *dir, struct dentry *dentry)
         /* Walk entries to find the target */
         u64 offset = 0;
         int found = 0;
-        u64 entry_off = 0;
+        int modified = 0;
 
         while (offset < dir_size) {
                 struct ext4_dirent *de = (struct ext4_dirent *)(buf + offset);
-                if (de->inode == 0 || de->rec_len == 0)
+                if (de->rec_len == 0)
                         break;
 
                 if (de->name_len == (u8)namelen &&
                     memcmp(de->name, name, namelen) == 0) {
                         found = 1;
-                        entry_off = offset;
-                        break;
+                        if (de->inode != 0) {
+                                de->inode = 0;
+                                modified = 1;
+                        }
                 }
                 offset += de->rec_len;
         }
@@ -1046,61 +1055,43 @@ static int ext4_unlink(struct inode *dir, struct dentry *dentry)
                 return -ENOENT;
         }
 
-        /* Mark the entry as deleted */
-        struct ext4_dirent *de = (struct ext4_dirent *)(buf + entry_off);
-        u32 deleted_ino = de->inode;
-        de->inode = 0;
+        if (modified) {
+                u32 blocks = (u32)((dir_size + block_size - 1) / block_size);
+                for (u32 logical_block = 0; logical_block < blocks; logical_block++) {
+                        u32 phys_block;
+                        if (raw->i_flags & EXT4_EXTENTS_FL) {
+                                phys_block = ext4_find_extent_block(sbi, raw,
+                                                                    logical_block);
+                        } else if (logical_block < EXT4_DIRECT_BLOCKS) {
+                                phys_block = raw->i_block[logical_block];
+                        } else {
+                                phys_block = ~0U;
+                        }
 
-        /* Write back the directory block */
-        u32 logical_block = (u32)(entry_off / block_size);
-        u32 phys_block;
-        if (raw->i_flags & EXT4_EXTENTS_FL) {
-                phys_block = ext4_find_extent_block(sbi, raw, logical_block);
-        } else {
-                if (logical_block < EXT4_DIRECT_BLOCKS)
-                        phys_block = raw->i_block[logical_block];
-                else
-                        phys_block = ~0U;
-        }
+                        if (phys_block == 0 || phys_block == ~0U)
+                                continue;
 
-        if (phys_block == ~0U) {
-                kfree(buf);
-                return -EIO;
-        }
-
-        u64 byte_off = (u64)phys_block * block_size;
-        ext4_write_at(sbi->dev, byte_off, buf + logical_block * block_size,
-                      block_size);
-
-        kfree(buf);
-
-        /* Decrement target inode's i_links_count */
-        u32 ino = deleted_ino;
-        u32 bg_idx = (ino - 1) / sbi->inodes_per_group;
-        u32 bg_ino_idx = (ino - 1) % sbi->inodes_per_group;
-        struct ext4_group_desc bgd;
-
-        if (ext4_read_group_desc(sbi, bg_idx, &bgd) == 0) {
-                u64 inode_table_off = (u64)bgd.bg_inode_table_lo * block_size;
-                u64 inode_disk_off = inode_table_off +
-                                     (u64)bg_ino_idx * sbi->inode_size;
-
-                struct ext4_inode target_raw;
-                int r = ext4_read_at(sbi->dev, inode_disk_off, &target_raw,
-                                     sizeof(target_raw));
-                if (r == 0) {
-                        if (target_raw.i_links_count > 0)
-                                target_raw.i_links_count--;
-                        ext4_write_at(sbi->dev, inode_disk_off, &target_raw,
-                                      sizeof(target_raw));
+                        u64 byte_off = (u64)phys_block * block_size;
+                        ext4_write_at(sbi->dev, byte_off,
+                                      buf + (u64)logical_block * block_size,
+                                      block_size);
                 }
         }
+
+        kfree(buf);
 
         /* Update parent inode's mtime and mark dirty */
         dir->i_mtime = 0;
         inode_dirty(dir);
 
         return 0;
+}
+
+static int ext4_rmdir(struct inode *dir, struct dentry *dentry)
+{
+	if (!dentry || !dentry->d_inode)
+		return -ENOENT;
+	return ext4_unlink(dir, dentry);
 }
 
 /* inode_operations: create (regular file) */
@@ -1319,7 +1310,7 @@ static int ext4_readdir(struct file *file, struct dirent *dirent_buf,
 			struct dirent *d =
 				(struct dirent *)((u8 *)dirent_buf + written);
 			d->d_ino  = de->inode;
-			d->d_off  = off;
+			d->d_off  = off + de->rec_len;
 			d->d_reclen = sizeof(struct dirent);
 			d->d_type = de->file_type;
 			u8 len = de->name_len;
