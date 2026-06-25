@@ -31,6 +31,7 @@ esac
 # 评测机参数（可根据需要调整）
 MEM=${MEM:-"128M"}
 SMP=${SMP:-"1"}
+RUN_TIMEOUT=${RUN_TIMEOUT:-"240"}
 
 KERNEL="${KERNEL_DIR}/${KERNEL_BIN}"
 SDCARD="${SDCARD:-}"
@@ -93,6 +94,7 @@ echo -e "${GREEN}fs.img:   ${FS_IMG} $(ls -lh ${FS_IMG} | awk '{print $5}')${NC}
 echo -e "${GREEN}disk.img: ${DISK_IMG} $(ls -lh ${DISK_IMG} | awk '{print $5}')${NC}"
 echo -e "${GREEN}内存:     ${MEM}${NC}"
 echo -e "${GREEN}CPU数:    ${SMP}${NC}"
+echo -e "${GREEN}超时:     ${RUN_TIMEOUT}s${NC}"
 echo ""
 
 OUTFILE="${KERNEL_DIR}/test_output_$(date +%Y%m%d_%H%M%S).log"
@@ -126,7 +128,7 @@ docker run --rm \
     -v "${KERNEL_DIR}:${KERNEL_DIR}" \
     --entrypoint bash \
     "${DOCKER_IMAGE}" \
-    -c "timeout 120 ${QEMU_CMD}" 2>&1 | tee "${OUTFILE}"
+    -c "timeout ${RUN_TIMEOUT} ${QEMU_CMD}" 2>&1 | tee "${OUTFILE}"
 
 EXIT_CODE=${PIPESTATUS[0]}
 
