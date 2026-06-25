@@ -101,11 +101,7 @@ static void ensure_busybox_wrapper(const char *root, const char *name)
 	my_strcpy(path, root);
 	my_strcat(path, name);
 
-	fd = my_openat(-100, path, O_RDONLY);
-	if (fd >= 0) {
-		my_close(fd);
-		return;
-	}
+	my_unlinkat(-100, path, 0);
 
 	my_strcpy(script, "#!");
 	my_strcat(script, root);
@@ -114,6 +110,28 @@ static void ensure_busybox_wrapper(const char *root, const char *name)
 	my_strcat(script, "busybox ");
 	my_strcat(script, name);
 	my_strcat(script, " \"$@\"\n");
+
+	fd = my_openat(-100, path, O_CREAT | O_WRONLY | O_TRUNC);
+	if (fd < 0)
+		return;
+	my_write(fd, script, my_strlen(script));
+	my_close(fd);
+}
+
+static void ensure_bin_busybox(const char *root)
+{
+	char path[256];
+	char script[384];
+	int fd;
+
+	my_strcpy(path, "/bin/busybox");
+	my_unlinkat(-100, path, 0);
+
+	my_strcpy(script, "#!");
+	my_strcat(script, root);
+	my_strcat(script, "busybox sh\nexec ");
+	my_strcat(script, root);
+	my_strcat(script, "busybox \"$@\"\n");
 
 	fd = my_openat(-100, path, O_CREAT | O_WRONLY | O_TRUNC);
 	if (fd < 0)
@@ -176,6 +194,32 @@ static void print_busybox_case_banner(const char *phase, const char *line)
 		prints(line);
 	}
 	prints(" ==========");
+	println();
+}
+
+static void print_group_case_banner(const char *phase, const char *line)
+{
+	prints("========== ");
+	prints(phase);
+	prints(" test_group");
+	if (line && line[0]) {
+		prints(": ");
+		prints(line);
+	}
+	prints(" ==========");
+	println();
+}
+
+static void print_case_result(const char *kind, const char *name, int ok)
+{
+	prints("testcase ");
+	prints(kind);
+	prints(" ");
+	prints(name);
+	if (ok)
+		prints(" success");
+	else
+		prints(" fail");
 	println();
 }
 
@@ -378,11 +422,7 @@ static void cleanup_test_artifacts(const char *dirpath)
 			char *name = d->d_name;
 			if (!(name[0] == '.' && (name[1] == '\0' ||
 			    (name[1] == '.' && name[2] == '\0'))) &&
-			    (my_strcmp(name, "test_chdir") == 0 ||
-			     my_strcmp(name, "test_mkdir") == 0 ||
-			     my_strcmp(name, "test_close.txt") == 0 ||
-			     my_strcmp(name, "test_mmap.txt") == 0 ||
-			     my_strcmp(name, "test.txt") == 0 ||
+			    (my_strcmp(name, "test.txt") == 0 ||
 			     my_strcmp(name, "test_dir") == 0 ||
 			     my_strcmp(name, "test") == 0 ||
 			     my_starts_with(name, "busybox_cmd.bak"))) {
@@ -399,6 +439,54 @@ static const char *scan_groups[] = { "/musl/basic/", "/glibc/basic/" };
 static const char *scan_group_names[] = { "basic-musl", "basic-glibc" };
 static int scan_group_cnt = 2;
 
+static void run_lua_group(const char *root, const char *group_name)
+{
+	static const char *const lua_cases[] = {
+		"date.lua",
+		"file_io.lua",
+		"max_min.lua",
+		"random.lua",
+		"remove.lua",
+		"round_num.lua",
+		"sin30.lua",
+		"sort.lua",
+		"strings.lua",
+		0,
+	};
+	char luapath[256];
+
+	my_strcpy(luapath, root);
+	my_strcat(luapath, "lua");
+
+	prints("#### OS COMP TEST GROUP START "); prints(group_name); prints(" ####"); println();
+	for (int i = 0; lua_cases[i]; i++) {
+		char case_name[128];
+		long cpid;
+		int status = 0;
+
+		my_strcpy(case_name, group_name);
+		my_strcat(case_name, ": ");
+		my_strcat(case_name, lua_cases[i]);
+
+		print_group_case_banner("START", case_name);
+		prints("[RUN] ./lua "); prints(lua_cases[i]); println();
+
+		cpid = my_fork();
+		if (cpid == 0) {
+			long argv[3] = { (long)luapath, (long)lua_cases[i], 0 };
+			my_chdir(root);
+			long ret = my_execve(luapath, (long)argv, (long)default_envp);
+			prints("[FAIL] lua execve failed: "); printn(ret); println();
+			my_exit(127);
+		}
+
+		my_wait4(cpid, &status, 0, 0);
+		print_case_result("lua", case_name, ((status >> 8) & 0xff) == 0);
+		print_group_case_banner("END", case_name);
+	}
+	prints("#### OS COMP TEST GROUP END "); prints(group_name); prints(" ####"); println();
+}
+
 static void run_busybox(const char *root, const char *group_name)
 {
 	char script[256];
@@ -409,6 +497,7 @@ static void run_busybox(const char *root, const char *group_name)
 	char bbpath[256];
 	my_strcpy(bbpath, root); my_strcat(bbpath, "busybox");
 	cleanup_test_artifacts(root);
+	ensure_bin_busybox(root);
 	ensure_busybox_wrappers(root);
 
 	run_busybox_cmd_list(root, group_name, bbpath);
@@ -435,6 +524,10 @@ void _start(void)
 		char bb_name[64]; my_strcpy(bb_name, "busybox-");
 		my_strcat(bb_name, scan_group_names[g] + 6);
 		run_busybox(root, bb_name);
+
+		char lua_name[64]; my_strcpy(lua_name, "lua-");
+		my_strcat(lua_name, scan_group_names[g] + 6);
+		run_lua_group(root, lua_name);
 	}
 
 	prints("#### OS COMP TEST END ####"); println();
