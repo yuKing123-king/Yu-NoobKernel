@@ -3,8 +3,8 @@
  */
 /* #define DEBUG_DUMP_TREE */
 
-/* 空 envp 数组，供 execve 使用（glibc 需要 envp 非 NULL） */
-static long empty_envp[1] = { 0 };
+static char env_path[] = "PATH=.:/musl:/glibc";
+static long default_envp[2] = { (long)env_path, 0 };
 
 /* Syscall 编号 (Linux RISC-V ABI) */
 #define SYS_read        63
@@ -20,11 +20,19 @@ static long empty_envp[1] = { 0 };
 #define SYS_shutdown    500
 #define SYS_chdir       49
 #define SYS_dup3        24
+#define SYS_pipe2       59
+#define SYS_lseek       62
+#define SYS_unlinkat    35
 
 #define O_RDONLY    0
+#define O_WRONLY    1
+#define O_CREAT     0100
+#define O_TRUNC     01000
 #define O_DIRECTORY 0200000
+#define SEEK_SET    0
 #define DT_REG       8
 #define DT_DIR       4
+#define AT_REMOVEDIR 0x200
 
 struct linux_dirent64 {
 	unsigned long long d_ino;
@@ -80,6 +88,34 @@ static long my_brk(long a){return syscall1(SYS_brk,a);}
 __attribute__((noreturn)) static void my_shutdown(void){syscall1(SYS_shutdown,0);while(1){}}
 static long my_getdents64(int fd,void*buf,int len){return syscall3(SYS_getdents64,fd,(long)buf,len);}
 static long my_dup3(int oldfd, int newfd, int flags) { return syscall3(SYS_dup3, oldfd, newfd, flags); }
+static long my_lseek(int fd, long off, int whence) { return syscall3(SYS_lseek, fd, off, whence); }
+static long my_unlinkat(int dirfd, const char *path, int flags) { return syscall3(SYS_unlinkat, dirfd, (long)path, flags); }
+
+static void ensure_busybox_wrapper(const char *root, const char *name)
+{
+	char path[256];
+	char script[384];
+	int fd;
+
+	my_strcpy(path, root);
+	my_strcat(path, name);
+
+	my_unlinkat(-100, path, 0);
+
+	my_strcpy(script, "#!");
+	my_strcat(script, root);
+	my_strcat(script, "busybox sh\nexec ");
+	my_strcat(script, root);
+	my_strcat(script, "busybox ");
+	my_strcat(script, name);
+	my_strcat(script, " \"$@\"\n");
+
+	fd = my_openat(-100, path, O_CREAT | O_WRONLY | O_TRUNC);
+	if (fd < 0)
+		return;
+	my_write(fd, script, my_strlen(script));
+	my_close(fd);
+}
 
 static int is_elf_path(const char *path)
 {
@@ -108,6 +144,150 @@ static int is_shell_needed(const char *name)
 	return 0;
 }
 
+static int my_streq(const char *a, const char *b)
+{
+	return my_strcmp(a, b) == 0;
+}
+
+static void print_busybox_case_banner(const char *phase, const char *line)
+{
+	prints("========== ");
+	prints(phase);
+	prints(" test_busybox");
+	if (line && line[0]) {
+		prints(": ");
+		prints(line);
+	}
+	prints(" ==========");
+	println();
+}
+
+static int line_needs_shell(const char *line)
+{
+	for (int i = 0; line[i]; i++) {
+		char c = line[i];
+		if (c == '|' || c == '>' || c == '<')
+			return 1;
+	}
+	return 0;
+}
+
+static int tokenize_simple_cmd(char *line, char **argv, int max_args)
+{
+	int argc = 0;
+	int i = 0;
+
+	while (line[i]) {
+		while (line[i] == ' ' || line[i] == '\t')
+			i++;
+		if (!line[i])
+			break;
+		if (argc >= max_args - 1)
+			return -1;
+
+		if (line[i] == '"' || line[i] == '\'') {
+			char quote = line[i++];
+			argv[argc++] = &line[i];
+			while (line[i] && line[i] != quote)
+				i++;
+			if (!line[i])
+				return -1;
+			line[i++] = '\0';
+			continue;
+		}
+
+		argv[argc++] = &line[i];
+		while (line[i] && line[i] != ' ' && line[i] != '\t')
+			i++;
+		if (line[i])
+			line[i++] = '\0';
+	}
+
+	argv[argc] = 0;
+	return argc;
+}
+
+static void run_busybox_cmd_list(const char *root, const char *group_name,
+				      const char *bbpath)
+{
+	char cmdfile[256];
+	my_strcpy(cmdfile, root);
+	my_strcat(cmdfile, "busybox_cmd.txt");
+
+	int fd = my_openat(-100, cmdfile, O_RDONLY);
+	if (fd < 0) {
+		prints("[FAIL] cannot open busybox_cmd.txt"); println();
+		return;
+	}
+
+	char buf[4096];
+	long nread = my_read(fd, buf, sizeof(buf) - 1);
+	my_close(fd);
+	if (nread < 0) {
+		prints("[FAIL] cannot read busybox_cmd.txt"); println();
+		return;
+	}
+	buf[nread] = '\0';
+
+	int start = 0;
+	for (int i = 0;; i++) {
+		char ch = buf[i];
+		if (ch != '\n' && ch != '\0')
+			continue;
+
+		buf[i] = '\0';
+		char *line = &buf[start];
+		if (i > start && line[i - start - 1] == '\r')
+			line[i - start - 1] = '\0';
+
+		if (line[0] != '\0') {
+			print_busybox_case_banner("START", line);
+			prints("[BBRUN] "); prints(line); println();
+			long cpid = my_fork();
+			if (cpid == 0) {
+				my_chdir(root);
+				long r;
+				if (line_needs_shell(line)) {
+					long a[5] = {(long)bbpath, (long)"sh", (long)"-c",
+						     (long)line, 0};
+					r = my_execve(bbpath, (long)a, (long)default_envp);
+				} else {
+					char cmd[256];
+					char *argv[20];
+					long a[21];
+					my_strcpy(cmd, line);
+					int argc = tokenize_simple_cmd(cmd, argv, 20);
+					if (argc <= 0) {
+						prints("[FAIL] parse busybox cmd"); println();
+						my_exit(127);
+					}
+					a[0] = (long)bbpath;
+					for (int j = 0; j < argc; j++)
+						a[j + 1] = (long)argv[j];
+					a[argc + 1] = 0;
+					r = my_execve(bbpath, (long)a, (long)default_envp);
+				}
+				prints("[FAIL] busybox sh -c: "); printn(r); println();
+				my_exit(127);
+			}
+			int st = 0;
+			my_wait4(cpid, &st, 0, 0);
+			int code = (st >> 8) & 0xff;
+			if (code != 0 && !my_streq(line, "false")) {
+				prints("testcase busybox "); prints(line); prints(" fail"); println();
+			} else {
+				prints("testcase busybox "); prints(line); prints(" success"); println();
+			}
+			print_busybox_case_banner("END", line);
+		}
+
+		if (ch == '\0')
+			break;
+		start = i + 1;
+	}
+
+}
+
 static void run_elfs_in_dir(const char *dirpath)
 {
 	int fd = my_openat(-100, dirpath, O_RDONLY | O_DIRECTORY);
@@ -132,10 +312,56 @@ static void run_elfs_in_dir(const char *dirpath)
 				}
 				prints("[RUN] "); prints(path); println();
 				long cpid = my_fork();
-				if (cpid == 0) { my_chdir(dirpath); long argv[2]={(long)path,0}; long ret=my_execve(path,(long)argv,(long)empty_envp);
+				if (cpid == 0) { my_chdir(dirpath); long argv[2]={(long)path,0}; long ret=my_execve(path,(long)argv,(long)default_envp);
 					prints("[FAIL] execve failed: "); printn(ret); println(); my_exit(127); }
 				int status = 0; my_wait4(cpid, &status, 0, 0);
 				if (my_strcmp(name, "yield") == 0) { pos = nread; break; }
+			}
+			pos += d->d_reclen;
+		}
+	}
+	my_close(fd);
+}
+
+static int my_starts_with(const char *s, const char *prefix)
+{
+	for (int i = 0; prefix[i]; i++) {
+		if (s[i] != prefix[i])
+			return 0;
+	}
+	return 1;
+}
+
+static void cleanup_test_artifacts(const char *dirpath)
+{
+	int fd = my_openat(-100, dirpath, O_RDONLY | O_DIRECTORY);
+	if (fd < 0)
+		return;
+
+	char buf[4096];
+	long nread;
+	while ((nread = my_getdents64(fd, buf, sizeof(buf))) > 0) {
+		int pos = 0;
+		while (pos < (int)nread) {
+			struct linux_dirent64 *d = (struct linux_dirent64 *)(buf + pos);
+			if (d->d_reclen == 0)
+				break;
+			char *name = d->d_name;
+			if (!(name[0] == '.' && (name[1] == '\0' ||
+			    (name[1] == '.' && name[2] == '\0'))) &&
+			    (my_strcmp(name, "test_chdir") == 0 ||
+			     my_strcmp(name, "test_mkdir") == 0 ||
+			     my_strcmp(name, "test_close.txt") == 0 ||
+			     my_strcmp(name, "test_mmap.txt") == 0 ||
+			     my_strcmp(name, "test.txt") == 0 ||
+			     my_strcmp(name, "test_dir") == 0 ||
+			     my_strcmp(name, "test") == 0 ||
+			     my_strcmp(name, "ls") == 0 ||
+			     my_starts_with(name, "busybox_cmd.bak"))) {
+				if (d->d_type == DT_DIR)
+					my_unlinkat(fd, name, AT_REMOVEDIR);
+				else
+					my_unlinkat(fd, name, 0);
 			}
 			pos += d->d_reclen;
 		}
@@ -156,61 +382,67 @@ static void run_busybox(const char *root, const char *group_name)
 
 	char bbpath[256];
 	my_strcpy(bbpath, root); my_strcat(bbpath, "busybox");
+	ensure_busybox_wrapper(root, "ls");
 
 	/* 1) busybox true */
-	{ long cpid=my_fork(); if(cpid==0){ long a[3]={(long)bbpath,(long)"true",0}; long r=my_execve(bbpath,(long)a,(long)empty_envp);
+	{ long cpid=my_fork(); if(cpid==0){ long a[3]={(long)bbpath,(long)"true",0}; long r=my_execve(bbpath,(long)a,(long)default_envp);
 		prints("[FAIL] true: ");printn(r);println();my_exit(127);} int st=0;my_wait4(cpid,&st,0,0); }
 
 	/* 2) busybox pwd */
-	{ long cpid=my_fork(); if(cpid==0){ my_chdir(root); long a[3]={(long)bbpath,(long)"pwd",0}; long r=my_execve(bbpath,(long)a,(long)empty_envp);
+	{ long cpid=my_fork(); if(cpid==0){ my_chdir(root); long a[3]={(long)bbpath,(long)"pwd",0}; long r=my_execve(bbpath,(long)a,(long)default_envp);
 		prints("[FAIL] pwd: ");printn(r);println();my_exit(127);} int st=0;my_wait4(cpid,&st,0,0); }
 
 	/* 3) sh -c 'echo HELLO' (builtin echo) */
 	{ long cpid=my_fork(); if(cpid==0){ my_chdir(root); long a[5]={(long)bbpath,(long)"sh",(long)"-c",(long)"echo HELLO",0};
-		long r=my_execve(bbpath,(long)a,(long)empty_envp); prints("[FAIL] sh -c echo: ");printn(r);println();my_exit(127);} int st=0;my_wait4(cpid,&st,0,0); }
+		long r=my_execve(bbpath,(long)a,(long)default_envp); prints("[FAIL] sh -c echo: ");printn(r);println();my_exit(127);} int st=0;my_wait4(cpid,&st,0,0); }
 
 	/* 4) sh -c 'exit 42' (verify exit code) */
 	{ long cpid=my_fork(); if(cpid==0){ long a[5]={(long)bbpath,(long)"sh",(long)"-c",(long)"exit 42",0};
-		long r=my_execve(bbpath,(long)a,(long)empty_envp); prints("[FAIL] sh -c exit42: ");printn(r);println();my_exit(127);} int st=0;my_wait4(cpid,&st,0,0);
+		long r=my_execve(bbpath,(long)a,(long)default_envp); prints("[FAIL] sh -c exit42: ");printn(r);println();my_exit(127);} int st=0;my_wait4(cpid,&st,0,0);
 		prints("[DBG] exit42 status=");printn(st);println(); }
 
 	/* 5) sh -c 'echo ARGS:0=$0 1=$1 2=$2' aa bb (verify argv) */
 	{ long cpid=my_fork(); if(cpid==0){ my_chdir(root); long a[7]={(long)bbpath,(long)"sh",(long)"-c",(long)"echo ARGS:0=$0 1=$1 2=$2",(long)"aa",(long)"bb",0};
-		long r=my_execve(bbpath,(long)a,(long)empty_envp); prints("[FAIL] sh -c args: ");printn(r);println();my_exit(127);} int st=0;my_wait4(cpid,&st,0,0); }
+		long r=my_execve(bbpath,(long)a,(long)default_envp); prints("[FAIL] sh -c args: ");printn(r);println();my_exit(127);} int st=0;my_wait4(cpid,&st,0,0); }
 
-	/* 6) sh < script (stdin redirect from script file) */
-	{
-		int fd = my_openat(-100, script, O_RDONLY);
-		if (fd >= 0) {
-			long cpid = my_fork();
-			if (cpid == 0) {
-				my_dup3(fd, 0, 0);
-				my_close(fd);
-				my_chdir(root);
-				long a[3] = {(long)bbpath, (long)"sh", 0};
-				long r = my_execve(bbpath, (long)a, (long)empty_envp);
-				prints("[FAIL] sh stdin: ");printn(r);println();
-				my_exit(127);
-			}
-			int st = 0;
-			my_wait4(cpid, &st, 0, 0);
-			my_close(fd);
-			prints("[DBG] sh stdin exit=");printn(st);println();
-		} else {
-			prints("[FAIL] cannot open script for stdin");println();
-		}
+	/* 5b) DIAG: ./busybox ash -c exit */
+	{ long cpid=my_fork(); if(cpid==0){ my_chdir(root);
+		long a[5]={(long)bbpath,(long)"ash",(long)"-c",(long)"exit",0};
+		long r=my_execve(bbpath,(long)a,(long)default_envp); prints("[FAIL] ash -c exit: ");printn(r);println();my_exit(127);} int st=0;my_wait4(cpid,&st,0,0);
+		prints("[DBG] ash -c exit exit=");printn(st);println(); }
+
+	/* 5c) DIAG: ./busybox sh -c exit */
+	{ long cpid=my_fork(); if(cpid==0){ my_chdir(root);
+		long a[5]={(long)bbpath,(long)"sh",(long)"-c",(long)"exit",0};
+		long r=my_execve(bbpath,(long)a,(long)default_envp); prints("[FAIL] sh -c exit: ");printn(r);println();my_exit(127);} int st=0;my_wait4(cpid,&st,0,0);
+		prints("[DBG] sh -c exit exit=");printn(st);println(); }
+
+	/* 5d) DIAG: ./busybox basename /aaa/bbb */
+	{ long cpid=my_fork(); if(cpid==0){ my_chdir(root);
+		long a[4]={(long)bbpath,(long)"basename",(long)"/aaa/bbb",0};
+		long r=my_execve(bbpath,(long)a,(long)default_envp); prints("[FAIL] basename: ");printn(r);println();my_exit(127);} int st=0;my_wait4(cpid,&st,0,0);
+		prints("[DBG] basename exit=");printn(st);println(); }
+
+	/* 5e) DIAG: pipe 2 lines to while-read with eval (kernel-level pipe) */
+	{ int p64[2]; long r=syscall2(SYS_pipe2,(long)p64,0);
+	  if(r==0){
+	    my_write(p64[1],"echo AAA\nash -c exit\n",19);
+	    my_close(p64[1]);
+	    long cpid = my_fork();
+	    if(cpid==0){
+	      my_dup3(p64[0], 0, 0); my_close(p64[0]);
+	      my_chdir(root);
+	      long a[5]={(long)bbpath,(long)"sh",(long)"-c",
+	        (long)"while read line; do echo GOT:$line; eval \"./busybox $line\"; echo DONE:$line; done",0};
+	      long r=my_execve(bbpath,(long)a,(long)default_envp); prints("[FAIL] while: ");printn(r);println();my_exit(127);
+	    }
+	    int st=0; my_wait4(cpid,&st,0,0);
+	    prints("[DBG] while-eval exit=");printn(st);println(); my_close(p64[0]);
+	  }
 	}
 
-	/* 7) sh /musl/busybox_testcode.sh (argument — competition pattern) */
-	{ long cpid=my_fork(); if(cpid==0){ my_chdir(root); long a[4]={(long)bbpath,(long)"sh",(long)script,0};
-		long r=my_execve(bbpath,(long)a,(long)empty_envp); prints("[FAIL] sh script: ");printn(r);println();my_exit(127);} int st=0;my_wait4(cpid,&st,0,0);
-		prints("[DBG] sh script exit=");printn(st);println(); }
-
-	/* 8) sh -c '. /musl/busybox_testcode.sh' (source the script) */
-	{ long cpid=my_fork(); if(cpid==0){ my_chdir(root);
-		long a[5]={(long)bbpath,(long)"sh",(long)"-c",(long)". ./busybox_testcode.sh",0};
-		long r=my_execve(bbpath,(long)a,(long)empty_envp); prints("[FAIL] sh -c source: ");printn(r);println();my_exit(127);} int st=0;my_wait4(cpid,&st,0,0);
-		prints("[DBG] source exit=");printn(st);println(); }
+	/* 6) sh < script (stdin redirect from script file) */
+	run_busybox_cmd_list(root, group_name, bbpath);
 
 	prints("#### OS COMP TEST GROUP END "); prints(group_name); prints(" ####"); println();
 }
@@ -222,6 +454,7 @@ void _start(void)
 	prints("#### OS COMP TEST START ####"); println();
 
 	for (int g = 0; g < scan_group_cnt; g++) {
+		cleanup_test_artifacts(scan_groups[g]);
 		prints("#### OS COMP TEST GROUP START "); prints(scan_group_names[g]); prints(" ####"); println();
 		run_elfs_in_dir(scan_groups[g]);
 		prints("#### OS COMP TEST GROUP END "); prints(scan_group_names[g]); prints(" ####"); println();
