@@ -135,7 +135,7 @@ static void *slab_alloc(struct slab *s)
  * @param addr: 待释放的对象地址
  * @return: 无返回值
  */
-static void slab_free(void *addr)
+static bool slab_free(void *addr)
 {
 	struct slab *s = (void *)SLAB_ALIGN_DOWN(addr);
 	if (s->magic != SLAB_MAGIC)
@@ -150,8 +150,10 @@ static void slab_free(void *addr)
 		panic("trying free out-bounded block at %p in slab", addr);
 
 	if (bitmap_get(&s->bm, idx) == 0) {
-		warnf("double free %p in slab '%s'", addr, s->kmem->name);
-		return;
+		void *ra0 = __builtin_return_address(0);
+		warnf("double free %p in slab '%s' ra0=%p",
+		      addr, s->kmem->name, ra0);
+		return false;
 	}
 
 	if (s->free == s->total)
@@ -163,6 +165,7 @@ static void slab_free(void *addr)
 	bitmap_clear(&s->bm, idx);
 	s->free++;
 	slab_log("%s freed %p", s->kmem->name, addr);
+	return true;
 }
 
 /*
@@ -289,15 +292,15 @@ void *kmem_cache_alloc(struct kmem_cache *kmem)
  */
 void kmem_cache_free(void *addr)
 {
-	struct slab *slab = (void *)SLAB_ALIGN_DOWN(addr), *n;
+	struct slab *slab = (void *)SLAB_ALIGN_DOWN(addr);
 	struct kmem_cache *kmem = slab->kmem;
 	if (spinlock_holding(&kmem->lock)) {
-		slab_free(addr);
-		kmem->free++;
+		if (slab_free(addr))
+			kmem->free++;
 	} else {
 		spinlock_acquire(&kmem->lock);
-		slab_free(addr);
-		kmem->free++;
+		if (slab_free(addr))
+			kmem->free++;
 		spinlock_release(&kmem->lock);
 	}
 }

@@ -31,7 +31,7 @@ static struct pipe *get_pipe(struct file *f)
 
 static int pipe_is_read_end(struct file *f)
 {
-	return f->f_flags & O_RDONLY;
+	return (f->f_flags & O_ACCMODE) == O_RDONLY;
 }
 
 ssize_t pipe_read(struct file *f, void *ubuf, size_t count, loff_t *pos)
@@ -55,6 +55,7 @@ ssize_t pipe_read(struct file *f, void *ubuf, size_t count, loff_t *pos)
 		}
 		wait_queue_sleep_locked(&p->rq, cur, &p->lock);
 	}
+	(void)cur;
 
 	while (total < (int)count) {
 		if (p->count == 0) {
@@ -128,25 +129,31 @@ int pipe_release(struct inode *inode, struct file *f)
 	(void)inode;
 
 	struct pipe *p = get_pipe(f);
+	int free_pipe = 0;
 	if (!p)
 		return 0;
 
 	spinlock_acquire(&p->lock);
 
 	if (pipe_is_read_end(f)) {
-		p->nreaders--;
+		if (p->nreaders > 0)
+			p->nreaders--;
 		wait_queue_wakeup_all(&p->wq);
 	} else {
-		p->nwriters--;
+		if (p->nwriters > 0)
+			p->nwriters--;
 		wait_queue_wakeup_all(&p->rq);
 	}
 
-	if (p->nreaders == 0 && p->nwriters == 0) {
-		kfree(p);
-		f->f_private = NULL;
-	}
+	if (p->nreaders == 0 && p->nwriters == 0)
+		free_pipe = 1;
 
 	spinlock_release(&p->lock);
+
+	if (free_pipe)
+		kfree(p);
+
+	f->f_private = NULL;
 	return 0;
 }
 

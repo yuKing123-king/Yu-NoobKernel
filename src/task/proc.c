@@ -129,6 +129,7 @@ void free_proc(struct proc *p)
 	if (p->parent) {
 		spinlock_acquire(&p->parent->lock);
 		list_del(&p->sibling);
+		INIT_LIST_HEAD(&p->sibling);
 		spinlock_release(&p->parent->lock);
 		p->parent = NULL;
 	}
