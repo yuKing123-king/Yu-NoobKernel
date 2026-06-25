@@ -41,7 +41,7 @@ extern char trampoline[];
  * 使用开放寻址哈希表，容量 64，负载因子 < 0.5
  * ============================================================ */
 
-#define SC_TABLE_BITS 6
+#define SC_TABLE_BITS 8
 #define SC_TABLE_SIZE (1 << SC_TABLE_BITS)
 #define SC_TABLE_MASK (SC_TABLE_SIZE - 1)
 
@@ -84,6 +84,218 @@ syscall_fn_t syscall_lookup(int nr)
  * ============================================================ */
 
 static inline struct proc *curproc(void) { return thiscpu()->proc; }
+
+struct kernel_timespec {
+	long tv_sec;
+	long tv_nsec;
+};
+
+struct kernel_rtc_time {
+	int tm_sec;
+	int tm_min;
+	int tm_hour;
+	int tm_mday;
+	int tm_mon;
+	int tm_year;
+	int tm_wday;
+	int tm_yday;
+	int tm_isdst;
+};
+
+struct pseudo_text_file {
+	char *data;
+	size_t len;
+};
+
+#define RTC_RD_TIME 0x80247009UL
+
+static ssize_t pseudo_text_read(struct file *file, void *buf, size_t count,
+				 loff_t *pos)
+{
+	struct pseudo_text_file *pf = (struct pseudo_text_file *)file->f_private;
+	size_t avail;
+
+	if (!pf || !buf || !pos)
+		return -EINVAL;
+	if ((size_t)*pos >= pf->len)
+		return 0;
+
+	avail = pf->len - (size_t)*pos;
+	if (count > avail)
+		count = avail;
+	memcpy(buf, pf->data + *pos, count);
+	*pos += count;
+	return count;
+}
+
+static int pseudo_text_release(struct inode *inode, struct file *file)
+{
+	(void)inode;
+	struct pseudo_text_file *pf = (struct pseudo_text_file *)file->f_private;
+	if (pf) {
+		kfree(pf->data);
+		kfree(pf);
+		file->f_private = NULL;
+	}
+	return 0;
+}
+
+static struct file_operations pseudo_text_fops = {
+	.read = pseudo_text_read,
+	.release = pseudo_text_release,
+};
+
+static struct file *open_proc_mounts_file(void)
+{
+	static const char mounts[] = "/dev/root / ext4 rw 0 0\n";
+	struct pseudo_text_file *pf;
+	struct file *f;
+
+	pf = kzalloc(sizeof(*pf));
+	if (!pf)
+		return PTR(-ENOMEM);
+	pf->len = sizeof(mounts) - 1;
+	pf->data = kmalloc(pf->len);
+	if (!pf->data) {
+		kfree(pf);
+		return PTR(-ENOMEM);
+	}
+	memcpy(pf->data, mounts, pf->len);
+
+	f = file_alloc();
+	if (IS_ERR(f)) {
+		kfree(pf->data);
+		kfree(pf);
+		return f;
+	}
+
+	f->f_op = &pseudo_text_fops;
+	f->f_private = pf;
+	f->f_mode = S_IFCHR;
+	f->f_flags = O_RDONLY;
+	return f;
+}
+
+static struct file *open_pseudo_text_file(const char *text, size_t len)
+{
+	struct pseudo_text_file *pf;
+	struct file *f;
+
+	pf = kzalloc(sizeof(*pf));
+	if (!pf)
+		return PTR(-ENOMEM);
+	pf->len = len;
+	pf->data = kmalloc(len);
+	if (!pf->data) {
+		kfree(pf);
+		return PTR(-ENOMEM);
+	}
+	memcpy(pf->data, text, len);
+
+	f = file_alloc();
+	if (IS_ERR(f)) {
+		kfree(pf->data);
+		kfree(pf);
+		return f;
+	}
+
+	f->f_op = &pseudo_text_fops;
+	f->f_private = pf;
+	f->f_mode = S_IFCHR;
+	f->f_flags = O_RDONLY;
+	return f;
+}
+
+static int pseudo_dir_readdir(struct file *file, struct dirent *buf, size_t count)
+{
+	static const char *entries[] = { ".", ".." };
+	size_t written = 0;
+	int idx = (int)file->f_pos;
+
+	while (idx < 2 && written + sizeof(struct dirent) <= count) {
+		struct dirent *d = (struct dirent *)((char *)buf + written);
+		memset(d, 0, sizeof(*d));
+		d->d_ino = 1;
+		d->d_off = idx + 1;
+		d->d_reclen = sizeof(struct dirent);
+		d->d_type = 2;
+		strcpy(d->d_name, entries[idx]);
+		written += sizeof(struct dirent);
+		idx++;
+	}
+
+	file->f_pos = idx;
+	return (int)written;
+}
+
+static loff_t pseudo_dir_llseek(struct file *file, loff_t offset, int whence)
+{
+	switch (whence) {
+	case SEEK_SET:
+		if (offset < 0)
+			return -EINVAL;
+		file->f_pos = offset;
+		return file->f_pos;
+	case SEEK_CUR:
+		if (file->f_pos + offset < 0)
+			return -EINVAL;
+		file->f_pos += offset;
+		return file->f_pos;
+	default:
+		return -EINVAL;
+	}
+}
+
+static struct file_operations pseudo_dir_fops = {
+	.readdir = pseudo_dir_readdir,
+	.llseek = pseudo_dir_llseek,
+};
+
+static struct file *open_proc_dir_file(void)
+{
+	struct file *f = file_alloc();
+	if (IS_ERR(f))
+		return f;
+
+	f->f_op = &pseudo_dir_fops;
+	f->f_mode = S_IFDIR;
+	f->f_flags = O_RDONLY;
+	return f;
+}
+
+static struct file *open_dev_rtc_file(void)
+{
+	static const char rtc_text[] = "Thu Jan  1 00:00:00 1970\n";
+	return open_pseudo_text_file(rtc_text, sizeof(rtc_text) - 1);
+}
+
+static struct dentry *resolve_dirfd_base(struct proc *p, long dirfd,
+					 const char *path,
+					 struct file **dir_file_out)
+{
+	if (dir_file_out)
+		*dir_file_out = NULL;
+
+	if (!path || path[0] == '/')
+		return NULL;
+
+	if (dirfd == AT_FDCWD)
+		return p->pwd;
+
+	struct file *dir_file = fd_get(p->fd_table, (int)dirfd);
+	if (!dir_file)
+		return p->pwd;
+
+	if (!dir_file->f_dentry) {
+		file_put(dir_file);
+		return p->pwd;
+	}
+
+	if (dir_file_out)
+		*dir_file_out = dir_file;
+
+	return dir_file->f_dentry;
+}
 
 /* ============================================================
  * I/O: read / write
@@ -162,6 +374,10 @@ static void execve_die(int status)
 	struct proc *p = curproc();
 	p->exit_code = status;
 	p->state = PROC_ZOMBIE;
+	if (p->fd_table) {
+		fd_table_free(p->fd_table);
+		p->fd_table = NULL;
+	}
 	if (p->parent)
 		wait_queue_wakeup_one(&p->parent->child_wait);
 	sched_yield();
@@ -177,6 +393,12 @@ uintptr_t sys_exit(int status)
 	struct proc *p = curproc();
 	p->exit_code = status;
 	p->state = PROC_ZOMBIE;
+
+	/* 关闭所有 fd：使管道写端及时释放，避免读端永久阻塞等 EOF */
+	if (p->fd_table) {
+		fd_table_free(p->fd_table);
+		p->fd_table = NULL;
+	}
 
 	/* set_tid_address: 写 0 到 clear_child_tid，唤醒 futex 等待者 */
 	if (p->clear_child_tid) {
@@ -221,6 +443,21 @@ uintptr_t sys_getrandom(uintptr_t buf, size_t len, unsigned int flags)
 	return n;
 }
 
+uintptr_t sys_clock_gettime(int clkid, uintptr_t tp)
+{
+	struct proc *p = curproc();
+	(void)clkid;
+
+	struct kernel_timespec ts;
+	u64 ns = cputime_to_ns(r_time());
+	ts.tv_sec = (long)(ns / 1000000000ULL);
+	ts.tv_nsec = (long)(ns % 1000000000ULL);
+
+	if (copyout(p->pagetable, tp, (char *)&ts, sizeof(ts)) < 0)
+		return -EFAULT;
+	return 0;
+}
+
 uintptr_t sys_shutdown(void)
 {
 	infof("Shutdown requested");
@@ -245,26 +482,93 @@ uintptr_t sys_openat(uintptr_t dirfd, uintptr_t pathname, uintptr_t flags, uintp
 {
 	struct proc *p = curproc();
 	char path[256];
+	struct file *dir_file = NULL;
 	if (copyinstr(p->pagetable, path, pathname, sizeof(path)) < 0)
 		return -EFAULT;
 
-	/* 解析 base dentry: 绝对路径用 root，否则看 dirfd */
-	struct dentry *base = NULL;
-	if (path[0] == '/') {
-		base = NULL;
-	} else if ((long)dirfd == AT_FDCWD) {
-		base = p->pwd;
-	} else {
-		struct file *dir_file = fd_get(p->fd_table, (int)dirfd);
-		if (dir_file && dir_file->f_dentry)
-			base = dir_file->f_dentry;
-		else
-			base = p->pwd;
+	if (strcmp(path, "/proc/mounts") == 0) {
+		struct file *f = open_proc_mounts_file();
+		int fd;
+		if (IS_ERR(f))
+			return (uintptr_t)PTR_ERR(f);
+		fd = fd_alloc(p->fd_table);
+		if (fd < 0) {
+			file_put(f);
+			return -EMFILE;
+		}
+		if (fd_install(p->fd_table, fd, f) < 0) {
+			file_put(f);
+			return -EBADF;
+		}
+		return fd;
 	}
+	if (strcmp(path, "/proc/meminfo") == 0) {
+		static const char meminfo[] =
+			"MemTotal:       131072 kB\n"
+			"MemFree:         65536 kB\n"
+			"MemAvailable:    65536 kB\n"
+			"Buffers:             0 kB\n"
+			"Cached:              0 kB\n"
+			"SwapCached:          0 kB\n"
+			"SwapTotal:           0 kB\n"
+			"SwapFree:            0 kB\n";
+		struct file *f = open_pseudo_text_file(meminfo, sizeof(meminfo) - 1);
+		int fd;
+		if (IS_ERR(f))
+			return (uintptr_t)PTR_ERR(f);
+		fd = fd_alloc(p->fd_table);
+		if (fd < 0) {
+			file_put(f);
+			return -EMFILE;
+		}
+		if (fd_install(p->fd_table, fd, f) < 0) {
+			file_put(f);
+			return -EBADF;
+		}
+		return fd;
+	}
+	if (strcmp(path, "/proc") == 0) {
+		struct file *f = open_proc_dir_file();
+		int fd;
+		if (IS_ERR(f))
+			return (uintptr_t)PTR_ERR(f);
+		fd = fd_alloc(p->fd_table);
+		if (fd < 0) {
+			file_put(f);
+			return -EMFILE;
+		}
+		if (fd_install(p->fd_table, fd, f) < 0) {
+			file_put(f);
+			return -EBADF;
+		}
+		return fd;
+	}
+	if (strcmp(path, "/dev/misc/rtc") == 0) {
+		struct file *f = open_dev_rtc_file();
+		int fd;
+		if (IS_ERR(f))
+			return (uintptr_t)PTR_ERR(f);
+		fd = fd_alloc(p->fd_table);
+		if (fd < 0) {
+			file_put(f);
+			return -EMFILE;
+		}
+		if (fd_install(p->fd_table, fd, f) < 0) {
+			file_put(f);
+			return -EBADF;
+		}
+		return fd;
+	}
+
+	/* 解析 base dentry: 绝对路径用 root，否则看 dirfd */
+	struct dentry *base =
+		resolve_dirfd_base(p, (long)dirfd, path, &dir_file);
 	/* Normalize O_CREATE(0x40) -> O_CREAT(0x100) for all callers */
 	u32 norm_flags = (u32)flags;
 	if (norm_flags & 0x40) norm_flags |= O_CREAT;
 	struct file *f = vfs_open_cwd(path, norm_flags, base);
+	if (dir_file)
+		file_put(dir_file);
 	if (IS_ERR(f)) {
 		return (uintptr_t)PTR_ERR(f);
 	}
@@ -486,11 +790,13 @@ uintptr_t sys_clone(uintptr_t flags, uintptr_t child_stack, uintptr_t ptid,
 	}
 
 	fd_table_free(child->fd_table);
-	if (flags & CLONE_FILES) {
-		child->fd_table = parent->fd_table;
-	} else {
-		child->fd_table = fd_table_dup(parent->fd_table);
-	}
+	/*
+	 * Linux CLONE_FILES 语义是共享同一个 files_struct，并配套引用计数。
+	 * 当前内核没有 fd_table 共享/引用计数机制，直接别名会在子进程
+	 * exec/exit 时把父进程的 fd 表一起释放。
+	 * 先统一退化为 fork 风格复制，保证 shell/BusyBox 进程树稳定。
+	 */
+	child->fd_table = fd_table_dup(parent->fd_table);
 	if (!child->fd_table)
 		goto fail_freept;
 
@@ -739,6 +1045,24 @@ static int load_elf(struct file *f, struct proc *p, elf64_ehdr_t *ehdr,
 		*entry_out = base_addr + ehdr->e_entry;
 	if (max_va_out)
 		*max_va_out = max_va;
+
+	return 0;
+}
+
+static int map_zeroed_user_pages(pagetable_t pt, uintptr_t start,
+				 uintptr_t size, int perm)
+{
+	uintptr_t end = start + PAGE_ALIGN_UP(size);
+
+	for (uintptr_t va = start; va < end; va += PAGE_SIZE) {
+		uintptr_t pa = (uintptr_t)kzalloc(PAGE_SIZE);
+		if (!pa)
+			return -ENOMEM;
+		if (mappages(pt, va, pa, 1, perm) != 0) {
+			kfree((void *)pa);
+			return -ENOMEM;
+		}
+	}
 
 	return 0;
 }
@@ -1006,23 +1330,17 @@ uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 #define TLS_TCB_SIZE 0x70
 		uintptr_t tls_total = PAGE_ALIGN_UP(tls_memsz + TLS_TCB_SIZE);
 		uintptr_t tls_base = USER_TOP - STACK_PAGES * PAGE_SIZE - tls_total;
-		uintptr_t tls_pa = (uintptr_t)kzalloc(tls_total);
-		if (tls_pa) {
-			if (mappages(p->pagetable, tls_base, tls_pa,
-				     tls_total / PAGE_SIZE,
-				     PTE_R | PTE_W | PTE_U) == 0) {
-				/* tdata 起始：TLS 区域中偏移 (tls_total - memsz - TCB_SIZE) */
-				uintptr_t tdata_start = tls_base + tls_total - tls_memsz - TLS_TCB_SIZE;
-				if (tls_file_data && tls_filesz > 0)
-					copyout(p->pagetable, tdata_start,
-						tls_file_data, tls_filesz);
-				/* tp 指向 TCB 起始，对齐到 tls_align */
-				uintptr_t tcb_addr = tls_base + tls_total - TLS_TCB_SIZE;
-				tcb_addr &= ~(tls_align - 1);
-				tls_tcb = tcb_addr;
-			} else {
-				kfree((void *)tls_pa);
-			}
+		if (map_zeroed_user_pages(p->pagetable, tls_base, tls_total,
+					  PTE_R | PTE_W | PTE_U) == 0) {
+			/* tdata 起始：TLS 区域中偏移 (tls_total - memsz - TCB_SIZE) */
+			uintptr_t tdata_start = tls_base + tls_total - tls_memsz - TLS_TCB_SIZE;
+			if (tls_file_data && tls_filesz > 0)
+				copyout(p->pagetable, tdata_start,
+					tls_file_data, tls_filesz);
+			/* tp 指向 TCB 起始，对齐到 tls_align */
+			uintptr_t tcb_addr = tls_base + tls_total - TLS_TCB_SIZE;
+			tcb_addr &= ~(tls_align - 1);
+			tls_tcb = tcb_addr;
 		}
 #undef TLS_TCB_SIZE
 	}
@@ -1030,12 +1348,9 @@ uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 	/* 分配用户栈（使用 walkaddr 检查是否已有映射） */
 	uintptr_t stack_bot = USER_TOP - STACK_PAGES * PAGE_SIZE;
 	if (walkaddr(p->pagetable, stack_bot) == 0) {
-		uintptr_t pa = (uintptr_t)kzalloc(STACK_PAGES * PAGE_SIZE);
-		if (!pa)
-			return -ENOMEM;
-		if (mappages(p->pagetable, stack_bot, pa, STACK_PAGES,
-			     PTE_R | PTE_W | PTE_U) != 0) {
-			kfree((void *)pa);
+		if (map_zeroed_user_pages(p->pagetable, stack_bot,
+					  STACK_PAGES * PAGE_SIZE,
+					  PTE_R | PTE_W | PTE_U) != 0) {
 			return -ENOMEM;
 		}
 	}
@@ -1232,7 +1547,9 @@ uintptr_t sys_wait4(uintptr_t pid_arg, uintptr_t wstatus, uintptr_t options, uin
 					}
 
 					pid_t cpid = child->pid;
+					child->parent = NULL;
 					list_del(&child->sibling);
+					INIT_LIST_HEAD(&child->sibling);
 					spinlock_release(&p->lock);
 					free_proc(child);
 
@@ -1261,6 +1578,66 @@ uintptr_t sys_getppid(void)
 {
 	struct proc *p = curproc();
 	return p->parent ? p->parent->pid : 0;
+}
+
+uintptr_t sys_statfs(uintptr_t path, uintptr_t buf)
+{
+	struct proc *p = curproc();
+	char kpath[256];
+	struct statfs st;
+
+	if (copyinstr(p->pagetable, kpath, path, sizeof(kpath)) < 0)
+		return -EFAULT;
+	int ret = vfs_statfs(kpath, &st);
+	if (ret < 0)
+		return ret;
+	if (copyout(p->pagetable, buf, (char *)&st, sizeof(st)) < 0)
+		return -EFAULT;
+	return 0;
+}
+
+uintptr_t sys_fstatfs(int fd, uintptr_t buf)
+{
+	struct proc *p = curproc();
+	struct file *f = fd_get(p->fd_table, fd);
+	struct statfs st;
+	int ret;
+
+	if (!f)
+		return -EBADF;
+	if (!f->f_dentry || !f->f_dentry->d_inode || !f->f_dentry->d_inode->i_sb) {
+		file_put(f);
+		return -EINVAL;
+	}
+
+	struct super_block *sb = f->f_dentry->d_inode->i_sb;
+	if (!sb->s_op || !sb->s_op->statfs) {
+		file_put(f);
+		return -ENOSYS;
+	}
+
+	ret = sb->s_op->statfs(sb);
+	if (ret < 0) {
+		file_put(f);
+		return ret;
+	}
+
+	st.f_type = 0;
+	st.f_bsize = sb->s_blocksize;
+	st.f_blocks = 0;
+	st.f_bfree = 0;
+	st.f_bavail = 0;
+	st.f_files = 0;
+	st.f_ffree = 0;
+	st.f_fsid = sb->s_dev;
+	st.f_namelen = NAME_MAX;
+	st.f_frsize = sb->s_blocksize;
+	st.f_flags = sb->s_flags;
+	file_put(f);
+
+	if (copyout(p->pagetable, buf, (char *)&st, sizeof(st)) < 0)
+		return -EFAULT;
+	return 0;
 }
 
 /* ============================================================
@@ -1575,8 +1952,8 @@ uintptr_t sys_pipe2(uintptr_t pipefd, uintptr_t flags)
 			fd_free(p->fd_table, rfd);
 		if (wfd >= 0)
 			fd_free(p->fd_table, wfd);
-		file_free(rf);
-		file_free(wf);
+		file_put(rf);
+		file_put(wf);
 		return -EMFILE;
 	}
 
@@ -1653,13 +2030,23 @@ uintptr_t sys_writev(uintptr_t fd, uintptr_t iov, uintptr_t iovcnt)
 uintptr_t sys_fcntl(uintptr_t fd, uintptr_t cmd, uintptr_t arg)
 {
 	struct proc *p = curproc();
+	struct file *f;
 
-	if (cmd == 0 || cmd == 1030) {
+	/* Linux fcntl commands used by busybox/stdio */
+	enum {
+		F_DUPFD = 0,
+		F_GETFD = 1,
+		F_SETFD = 2,
+		F_GETFL = 3,
+		F_SETFL = 4,
+	};
+
+	if (cmd == F_DUPFD || cmd == 1030) {
 		/* F_DUPFD (0) / F_DUPFD_CLOEXEC (1030): dup to lowest >= arg */
 		int minfd = (int)arg;
 		if (minfd < 0) minfd = 0;
 
-		struct file *f = fd_get(p->fd_table, (int)fd);
+		f = fd_get(p->fd_table, (int)fd);
 		if (!f) return -EBADF;
 
 		/* 找到 >= minfd 的最小空闲 fd */
@@ -1690,22 +2077,68 @@ uintptr_t sys_fcntl(uintptr_t fd, uintptr_t cmd, uintptr_t arg)
 		return newfd;
 	}
 
-	/* F_SETFD (2), F_GETFD (1), F_GETFL (3) — stub, return success */
-	return 0;
+	f = fd_get(p->fd_table, (int)fd);
+	if (!f)
+		return -EBADF;
+
+	switch (cmd) {
+	case F_GETFD:
+		file_put(f);
+		return 0;
+	case F_SETFD:
+		file_put(f);
+		return 0;
+	case F_GETFL:
+	{
+		uintptr_t flags = f->f_flags | O_LARGEFILE;
+		file_put(f);
+		return flags;
+	}
+	case F_SETFL: {
+		u32 keep = f->f_flags & ~(O_APPEND | O_NONBLOCK);
+		u32 set = (u32)arg & (O_APPEND | O_NONBLOCK);
+		f->f_flags = keep | set;
+		file_put(f);
+		return 0;
+	}
+	default:
+		file_put(f);
+		return 0;
+	}
 }
 
 uintptr_t sys_ioctl(uintptr_t fd, uintptr_t request, uintptr_t arg)
 {
 	struct proc *p = curproc();
-	(void)arg;
+	u32 req = (u32)request;
 
-	switch (request) {
+	if (fd < 0)
+		return -EBADF;
+
+	switch (req) {
 	case 0x5401: /* TIOCSWINSZ: set window size — ignore */
 	case 0x5402: /* TIOCGWINSZ: get window size — stub */
 		return 0;
 	case 0x540f: /* TCGETS: get terminal attrs — not a terminal */
 	case 0x5413: /* TIOCGPGRP: get pgrp — not a terminal */
 		return -ENOTTY;
+	case (u32)RTC_RD_TIME:
+	{
+		struct kernel_rtc_time tm = {
+			.tm_sec = 0,
+			.tm_min = 0,
+			.tm_hour = 0,
+			.tm_mday = 1,
+			.tm_mon = 0,
+			.tm_year = 70,
+			.tm_wday = 4,
+			.tm_yday = 0,
+			.tm_isdst = 0,
+		};
+		if (copyout(p->pagetable, arg, (char *)&tm, sizeof(tm)) < 0)
+			return -EFAULT;
+		return 0;
+	}
 	default:
 		return -ENOTTY;
 	}
@@ -1719,26 +2152,76 @@ uintptr_t sys_mkdirat(uintptr_t dirfd, uintptr_t pathname, uintptr_t mode)
 {
 	struct proc *p = curproc();
 	char path[256];
+	struct file *dir_file = NULL;
 
 	if (copyinstr(p->pagetable, path, pathname, sizeof(path)) < 0)
 		return -EFAULT;
 
-	struct dentry *base = (path[0] == '/') ? NULL : p->pwd;
-	return vfs_mkdir_cwd(path, (umode_t)mode, base);
+	struct dentry *base =
+		resolve_dirfd_base(p, (long)dirfd, path, &dir_file);
+	int ret = vfs_mkdir_cwd(path, (umode_t)mode, base);
+	if (dir_file)
+		file_put(dir_file);
+	return ret;
 }
 
 uintptr_t sys_unlinkat(uintptr_t dirfd, uintptr_t pathname, uintptr_t flags)
 {
 	struct proc *p = curproc();
 	char path[256];
+	struct file *dir_file = NULL;
 
 	if (copyinstr(p->pagetable, path, pathname, sizeof(path)) < 0)
 		return -EFAULT;
 
-	struct dentry *base = (path[0] == '/') ? NULL : p->pwd;
+	struct dentry *base =
+		resolve_dirfd_base(p, (long)dirfd, path, &dir_file);
+	int ret;
 	if (flags & AT_REMOVEDIR)
-		return vfs_rmdir(path);
-	return vfs_unlink_cwd(path, base);
+		ret = vfs_rmdir_cwd(path, base);
+	else
+		ret = vfs_unlink_cwd(path, base);
+	if (dir_file)
+		file_put(dir_file);
+	return ret;
+}
+
+uintptr_t sys_utimensat(uintptr_t dirfd, uintptr_t pathname, uintptr_t times,
+			uintptr_t flags)
+{
+	struct proc *p = curproc();
+	char path[256];
+	struct file *dir_file = NULL;
+	struct dentry *d;
+	struct inode *inode;
+	u64 now_sec;
+
+	(void)times;
+	(void)flags;
+
+	if (copyinstr(p->pagetable, path, pathname, sizeof(path)) < 0)
+		return -EFAULT;
+
+	d = vfs_path_lookup(resolve_dirfd_base(p, (long)dirfd, path, &dir_file),
+			   path, LOOKUP_FOLLOW);
+	if (dir_file)
+		file_put(dir_file);
+	if (IS_ERR(d))
+		return PTR_ERR(d);
+
+	inode = d->d_inode;
+	if (!inode) {
+		dentry_put(d);
+		return -ENOENT;
+	}
+
+	now_sec = cputime_to_ns(r_time()) / 1000000000ULL;
+	inode->i_atime = now_sec;
+	inode->i_mtime = now_sec;
+	inode->i_ctime = now_sec;
+	inode_dirty(inode);
+	dentry_put(d);
+	return 0;
 }
 
 /* ============================================================
@@ -1799,6 +2282,40 @@ uintptr_t sys_uname(uintptr_t buf)
 	if (copyout(curproc()->pagetable, buf, (char *)&u, sizeof(u)) < 0)
 		return -EFAULT;
 
+	return 0;
+}
+
+struct kernel_sysinfo {
+	long uptime;
+	unsigned long loads[3];
+	unsigned long totalram;
+	unsigned long freeram;
+	unsigned long sharedram;
+	unsigned long bufferram;
+	unsigned long totalswap;
+	unsigned long freeswap;
+	unsigned short procs;
+	unsigned long totalhigh;
+	unsigned long freehigh;
+	unsigned int mem_unit;
+	char _f[20 - 2 * sizeof(long) - sizeof(int)];
+};
+
+uintptr_t sys_sysinfo(uintptr_t info)
+{
+	struct proc *p = curproc();
+	struct kernel_sysinfo si;
+	u64 sec = cputime_to_ns(r_time()) / 1000000000ULL;
+
+	memset(&si, 0, sizeof(si));
+	si.uptime = (long)sec;
+	si.totalram = 128UL * 1024UL * 1024UL;
+	si.freeram = 64UL * 1024UL * 1024UL;
+	si.mem_unit = 1;
+	si.procs = 1;
+
+	if (copyout(p->pagetable, info, (char *)&si, sizeof(si)) < 0)
+		return -EFAULT;
 	return 0;
 }
 
@@ -1940,18 +2457,23 @@ uintptr_t sys_fstatat(uintptr_t dirfd, uintptr_t pathname, uintptr_t statbuf,
 {
 	struct proc *p = curproc();
 	char path[256];
+	struct file *dir_file = NULL;
 
 	if (copyinstr(p->pagetable, path, pathname, sizeof(path)) < 0)
 		return -EFAULT;
 
-	(void)dirfd;
 	(void)flags;
 
 	/* 通过路径查找 inode */
-	struct dentry *base = p->pwd ? p->pwd : vfs_get_root();
+	struct dentry *base =
+		resolve_dirfd_base(p, (long)dirfd, path, &dir_file);
+	if (!base && path[0] != '/')
+		base = p->pwd ? p->pwd : vfs_get_root();
 	struct dentry *d = vfs_path_lookup(base, path, 0);
-	if (!d)
-		return -ENOENT;
+	if (dir_file)
+		file_put(dir_file);
+	if (IS_ERR(d))
+		return PTR_ERR(d);
 
 	struct inode *inode = d->d_inode;
 	if (!inode) {
@@ -2141,6 +2663,13 @@ uintptr_t sys_nanosleep(uintptr_t req, uintptr_t rem)
 	return 0;
 }
 
+uintptr_t sys_clock_nanosleep(int clockid, int flags, uintptr_t req, uintptr_t rem)
+{
+	(void)clockid;
+	(void)flags;
+	return sys_nanosleep(req, rem);
+}
+
 uintptr_t sys_times(uintptr_t tbuf)
 {
 	struct proc *p = curproc();
@@ -2167,14 +2696,48 @@ uintptr_t sys_sched_yield(void)
 	return 0;
 }
 
-/* ppoll stub — 返回 0 (无事件)，让 busybox 等不堵塞 */
+/* poll/ppoll constants */
+#define POLLIN    0x001
+#define POLLOUT   0x004
+#define POLLERR   0x008
+#define POLLHUP   0x010
+#define POLLNVAL  0x020
+struct pollfd { int fd; short events; short revents; };
+
+/* ppoll — 轮询文件描述符事件（简单实现，支持 POLLIN/POLLOUT） */
 uintptr_t sys_ppoll(uintptr_t fds, uintptr_t nfds, uintptr_t tsp, uintptr_t sigmask)
 {
-	(void)fds;
-	(void)nfds;
 	(void)tsp;
 	(void)sigmask;
-	return 0;
+	struct proc *p = curproc();
+	if (nfds > 16) nfds = 16; /* safety limit */
+	struct pollfd kfds[16];
+	if (copyin(p->pagetable, (char *)kfds, fds, sizeof(struct pollfd) * nfds) < 0)
+		return -EFAULT;
+	int nready = 0;
+	for (uintptr_t i = 0; i < nfds; i++) {
+		kfds[i].revents = 0;
+		if (kfds[i].fd < 0) {
+			nready++;
+			continue;
+		}
+		struct file *f = fd_get(p->fd_table, kfds[i].fd);
+		if (!f) {
+			kfds[i].revents = POLLNVAL;
+			nready++;
+			continue;
+		}
+		short events = kfds[i].events;
+		if (events & POLLIN)
+			kfds[i].revents |= POLLIN;
+		if (events & POLLOUT)
+			kfds[i].revents |= POLLOUT;
+		file_put(f);
+		nready++;
+	}
+	if (copyout(p->pagetable, fds, (char *)kfds, sizeof(struct pollfd) * nfds) < 0)
+		return -EFAULT;
+	return nready;
 }
 
 /* ============================================================
@@ -2224,6 +2787,10 @@ uintptr_t sys_tgkill(int tgid, int tid, int sig)
 		struct proc *p = curproc();
 		p->exit_code = -sig;
 		p->state = PROC_ZOMBIE;
+		if (p->fd_table) {
+			fd_table_free(p->fd_table);
+			p->fd_table = NULL;
+		}
 		if (p->parent)
 			wait_queue_wakeup_one(&p->parent->child_wait);
 		sched_yield();
@@ -2268,6 +2835,24 @@ uintptr_t sys_sendfile(int out_fd, int in_fd, uintptr_t offset, uintptr_t count)
 	(void)offset;
 	(void)count;
 	return -EINVAL;
+}
+
+uintptr_t sys_syslog(int type, uintptr_t buf, int len)
+{
+	struct proc *p = curproc();
+	static const char kmsg[] = "NoobKernel log buffer\n";
+	int n = len;
+
+	if (type != 3 && type != 10)
+		return 0;
+
+	if (n > (int)(sizeof(kmsg) - 1))
+		n = (int)(sizeof(kmsg) - 1);
+	if (n < 0)
+		n = 0;
+	if (n > 0 && copyout(p->pagetable, buf, (char *)kmsg, n) < 0)
+		return -EFAULT;
+	return n;
 }
 
 /* ============================================================
@@ -2326,7 +2911,10 @@ void syscall_init(void)
 	syscall_register(SYS_write,       (syscall_fn_t)sys_write);
 	syscall_register(SYS_close,       (syscall_fn_t)sys_close);
 	syscall_register(SYS_openat,      (syscall_fn_t)sys_openat);
+	syscall_register(SYS_vfork,       (syscall_fn_t)sys_fork);
 	syscall_register(SYS_getdents64,  (syscall_fn_t)sys_getdents);
+	syscall_register(SYS_statfs,      (syscall_fn_t)sys_statfs);
+	syscall_register(SYS_fstatfs,     (syscall_fn_t)sys_fstatfs);
 
 	/* 进程管理 - fork/clone 共用 SYS_clone (220)，由 child_stack==0 区分 */
 	syscall_register(SYS_clone,       (syscall_fn_t)sys_clone);
@@ -2357,6 +2945,7 @@ void syscall_init(void)
 	/* 文件系统 */
 	syscall_register(SYS_mkdirat,     (syscall_fn_t)sys_mkdirat);
 	syscall_register(SYS_unlinkat,    (syscall_fn_t)sys_unlinkat);
+	syscall_register(SYS_utimensat,   (syscall_fn_t)sys_utimensat);
 	syscall_register(SYS_symlinkat,   (syscall_fn_t)sys_symlinkat);
 	syscall_register(SYS_getcwd,      (syscall_fn_t)sys_getcwd);
 	syscall_register(SYS_chdir,       (syscall_fn_t)sys_chdir);
@@ -2371,7 +2960,10 @@ void syscall_init(void)
 
 	/* 杂项 */
 	syscall_register(SYS_uname,       (syscall_fn_t)sys_uname);
+	syscall_register(SYS_sysinfo,     (syscall_fn_t)sys_sysinfo);
 	syscall_register(SYS_gettimeofday, (syscall_fn_t)sys_gettimeofday);
+	syscall_register(SYS_clock_gettime, (syscall_fn_t)sys_clock_gettime);
+	syscall_register(SYS_clock_nanosleep, (syscall_fn_t)sys_clock_nanosleep);
 	syscall_register(SYS_nanosleep,    (syscall_fn_t)sys_nanosleep);
 	syscall_register(SYS_times,        (syscall_fn_t)sys_times);
 	syscall_register(SYS_sched_yield, (syscall_fn_t)sys_sched_yield);
@@ -2390,6 +2982,7 @@ void syscall_init(void)
 	syscall_register(SYS_faccessat,    (syscall_fn_t)sys_faccessat);
 	syscall_register(SYS_readlinkat,   (syscall_fn_t)sys_readlinkat);
 	syscall_register(SYS_sendfile,     (syscall_fn_t)sys_sendfile);
+	syscall_register(SYS_syslog,       (syscall_fn_t)sys_syslog);
 	syscall_register(SYS_set_robust_list, (syscall_fn_t)sys_set_robust_list);
 	syscall_register(SYS_prlimit64,    (syscall_fn_t)sys_prlimit64);
 

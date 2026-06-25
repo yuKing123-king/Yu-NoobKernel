@@ -39,6 +39,8 @@ uintptr_t sys_ioctl(uintptr_t fd, uintptr_t request, uintptr_t arg);
 /* 文件系统 */
 uintptr_t sys_mkdirat(uintptr_t dirfd, uintptr_t pathname, uintptr_t mode);
 uintptr_t sys_unlinkat(uintptr_t dirfd, uintptr_t pathname, uintptr_t flags);
+uintptr_t sys_utimensat(uintptr_t dirfd, uintptr_t pathname, uintptr_t times,
+			uintptr_t flags);
 
 /* 信号（stub） */
 uintptr_t sys_rt_sigaction(int sig, uintptr_t act, uintptr_t oact, size_t sigsetsize);
@@ -46,4 +48,6 @@ uintptr_t sys_rt_sigprocmask(int how, uintptr_t set, uintptr_t oset, size_t sigs
 
 /* 杂项 */
 uintptr_t sys_uname(uintptr_t buf);
+uintptr_t sys_sysinfo(uintptr_t info);
+uintptr_t sys_clock_nanosleep(int clockid, int flags, uintptr_t req, uintptr_t rem);
 uintptr_t sys_exit_group(int status);

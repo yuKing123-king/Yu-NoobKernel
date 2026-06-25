@@ -13,6 +13,7 @@
 #define SYS_exit_group  94
 #define SYS_exit        93
 #define SYS_openat      56
+#define SYS_vfork       58
 #define SYS_getdents64  61
 #define SYS_lseek       62
 #define SYS_getcwd      17
@@ -20,10 +21,15 @@
 #define SYS_fstat       80
 #define SYS_mount       40
 #define SYS_umount      39
+#define SYS_statfs      43
+#define SYS_fstatfs     44
 #define SYS_nanosleep   101
+#define SYS_clock_gettime 113
+#define SYS_clock_nanosleep 115
 #define SYS_sched_yield 124
 #define SYS_times       153
 #define SYS_gettimeofday 169
+#define SYS_sysinfo     179
 
 /* 新增：进程管理 */
 #define SYS_clone       220
@@ -53,6 +59,7 @@
 #define SYS_mkdirat     34
 #define SYS_unlinkat    35
 #define SYS_symlinkat   174
+#define SYS_utimensat   88
 #define SYS_statx       291
 #define SYS_fstatat     79
 #define SYS_newfstatat  79
@@ -63,6 +70,7 @@
 #define SYS_sigprocmask     135
 #define SYS_tgkill          131
 #define SYS_kill            129
+#define SYS_syslog          116
 
 /* 新增：IO 多路复用 */
 #define SYS_ppoll       73
