@@ -58,6 +58,8 @@
 /* 新增：文件系统操作 */
 #define SYS_mkdirat     34
 #define SYS_unlinkat    35
+#define SYS_renameat    38
+#define SYS_renameat2   276
 #define SYS_symlinkat   174
 #define SYS_utimensat   88
 #define SYS_statx       291

@@ -79,6 +79,8 @@ int vfs_unlink(const char *path);
 int vfs_unlink_cwd(const char *path, struct dentry *base);
 int vfs_create(const char *path, umode_t mode);
 int vfs_rename(const char *old_path, const char *new_path);
+int vfs_rename_cwd(const char *old_path, const char *new_path,
+		   struct dentry *old_base, struct dentry *new_base);
 
 struct dentry *vfs_get_root(void);
 

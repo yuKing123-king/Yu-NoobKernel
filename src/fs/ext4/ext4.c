@@ -687,6 +687,8 @@ static int ext4_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode);
 static int ext4_create(struct inode *dir, struct dentry *dentry, umode_t mode);
 static int ext4_unlink(struct inode *dir, struct dentry *dentry);
 static int ext4_rmdir(struct inode *dir, struct dentry *dentry);
+static int ext4_rename(struct inode *old_dir, struct dentry *old_dentry,
+		       struct inode *new_dir, struct dentry *new_dentry);
 
 struct super_operations ext4_super_ops = {
 	.alloc_inode   = ext4_alloc_inode,
@@ -702,6 +704,7 @@ struct inode_operations ext4_dir_inode_ops = {
 	.create = ext4_create,
 	.unlink = ext4_unlink,
 	.rmdir  = ext4_rmdir,
+	.rename = ext4_rename,
 };
 
 struct file_operations ext4_file_operations = {
@@ -907,103 +910,160 @@ static loff_t ext4_llseek(struct file *file, loff_t offset, int whence)
 static int ext4_add_dir_entry(struct inode *dir, u32 ino, const char *name,
                               int namelen, u8 file_type)
 {
-        struct ext4_sb_info *sbi = ext4_get_sbi(dir->i_sb);
-        struct ext4_inode *raw = (struct ext4_inode *)dir->i_private;
-        u32 block_size = sbi->block_size;
-        u64 dir_size  = dir->i_size;
+	struct ext4_sb_info *sbi = ext4_get_sbi(dir->i_sb);
+	struct ext4_inode *raw = (struct ext4_inode *)dir->i_private;
+	u32 block_size = sbi->block_size;
+	u64 dir_size = dir->i_size;
+	u64 scan_limit = dir_size ? dir_size : block_size;
+	u8 *buf;
+	u64 offset = 0;
+	u64 last_off = 0;
+	u32 last_phys_block = 0;
+	struct ext4_dirent *last_de = NULL;
+	u16 new_rec_len;
 
-        /* Calculate new entry's required rec_len (padded to 4 bytes) */
-        u16 new_rec_len = (u16)(sizeof(struct ext4_dirent) + namelen);
-        new_rec_len = (new_rec_len + 3) & ~3;
-        if (new_rec_len < 12)
-                new_rec_len = 12;
+	new_rec_len = (u16)(sizeof(struct ext4_dirent) + namelen);
+	new_rec_len = (new_rec_len + 3) & ~3;
+	if (new_rec_len < 12)
+		new_rec_len = 12;
 
-        /* Read current directory content */
-        u8 *buf = kzalloc(block_size);
-        if (!buf)
-                return -ENOMEM;
+	buf = kzalloc(block_size);
+	if (!buf)
+		return -ENOMEM;
 
-        if (dir_size > 0) {
-                ssize_t ret = ext4_read_data(dir->i_sb, raw, 0, buf, dir_size);
-                if (ret < 0) {
-                        kfree(buf);
-                        return ret;
-                }
-        }
+	while (offset < scan_limit) {
+		u32 logical_block = (u32)(offset / block_size);
+		u32 phys_block;
+		u64 byte_off;
+		u32 block_off = (u32)(offset % block_size);
 
-        /* Walk entries to find the last one */
-        u64 offset   = 0;
-        u64 last_off = 0;
-        struct ext4_dirent *last_de = NULL;
+		if (raw->i_flags & EXT4_EXTENTS_FL)
+			phys_block = ext4_find_extent_block(sbi, raw, logical_block);
+		else if (logical_block < EXT4_DIRECT_BLOCKS)
+			phys_block = raw->i_block[logical_block];
+		else
+			phys_block = ~0U;
 
-        while (offset < dir_size) {
-                struct ext4_dirent *de = (struct ext4_dirent *)(buf + offset);
-                if (de->inode == 0 || de->rec_len == 0)
-                        break;
-                last_de  = de;
-                last_off = offset;
-                offset += de->rec_len;
-        }
+		if (phys_block == 0 || phys_block == ~0U) {
+			offset = ((offset / block_size) + 1) * block_size;
+			continue;
+		}
 
-        /* Calculate actual size of last entry */
-        u16 last_actual;
-        if (last_de) {
-                last_actual = (u16)(sizeof(struct ext4_dirent) + last_de->name_len);
-                last_actual = (last_actual + 3) & ~3;
-                if (last_actual < 12)
-                        last_actual = 12;
-        } else {
-                last_off    = 0;
-                last_actual = 0;
-        }
+		byte_off = (u64)phys_block * block_size;
+		if (ext4_read_at(sbi->dev, byte_off, buf, block_size) < 0) {
+			kfree(buf);
+			return -EIO;
+		}
 
-        /* Check if new entry fits after the last entry in current block */
-        u64 new_off = last_off + last_actual;
-        if (new_off + new_rec_len > block_size) {
-                kfree(buf);
-                return -ENOSPC;
-        }
+		while (block_off < block_size && offset < scan_limit) {
+			struct ext4_dirent *de =
+				(struct ext4_dirent *)(buf + block_off);
+			if (de->rec_len == 0) {
+				kfree(buf);
+				return -EIO;
+			}
 
-        /* Shorten last entry's rec_len to its actual size */
-        if (last_de) {
-                last_de->rec_len = last_actual;
-        }
+			if (de->inode == 0 && de->rec_len >= new_rec_len) {
+				de->inode = ino;
+				de->name_len = (u8)namelen;
+				de->file_type = file_type;
+				memcpy(de->name, name, namelen);
+				if (ext4_write_at(sbi->dev,
+						  (u64)phys_block * block_size,
+						  buf, block_size) < 0) {
+					kfree(buf);
+					return -EIO;
+				}
+				inode_dirty(dir);
+				kfree(buf);
+				return 0;
+			}
 
-        /* Place new entry */
-        struct ext4_dirent *new_de = (struct ext4_dirent *)(buf + new_off);
-        new_de->inode     = ino;
-        new_de->name_len  = (u8)namelen;
-        new_de->file_type = file_type;
-        new_de->rec_len   = (u16)(block_size - new_off);
-        memcpy(new_de->name, name, namelen);
+			last_de = de;
+			last_off = offset;
+			last_phys_block = phys_block;
 
-        u64 new_size = new_off + new_de->rec_len;
+			block_off += de->rec_len;
+			offset += de->rec_len;
+		}
+	}
 
-        /* Write back — locate the physical block containing new_off */
-        u32 logical_block = (u32)(new_off / block_size);
-        u32 phys_block;
-        if (raw->i_flags & EXT4_EXTENTS_FL) {
-                phys_block = ext4_find_extent_block(sbi, raw, logical_block);
-        } else {
-                if (logical_block < EXT4_DIRECT_BLOCKS)
-                        phys_block = raw->i_block[logical_block];
-                else
-                        phys_block = ~0U;
-        }
+	if (last_de) {
+		u16 last_actual = (u16)(sizeof(struct ext4_dirent) + last_de->name_len);
+		u64 new_off;
+		u16 remain;
 
-        if (phys_block != ~0U) {
-                u64 byte_off = (u64)phys_block * block_size;
-                ext4_write_at(sbi->dev, byte_off, buf, block_size);
-        }
+		last_actual = (last_actual + 3) & ~3;
+		if (last_actual < 12)
+			last_actual = 12;
 
-        /* Update directory inode size */
-        dir->i_size = new_size;
-        raw->i_size_lo = (u32)(new_size & 0xFFFFFFFF);
-        raw->i_size_high = (u32)(new_size >> 32);
-        inode_dirty(dir);
+		if (last_de->rec_len < last_actual) {
+			kfree(buf);
+			return -EIO;
+		}
 
-        kfree(buf);
-        return 0;
+		remain = last_de->rec_len - last_actual;
+		if (remain < new_rec_len) {
+			kfree(buf);
+			return -ENOSPC;
+		}
+
+		new_off = last_off + last_actual;
+		last_de->rec_len = last_actual;
+
+		struct ext4_dirent *new_de =
+			(struct ext4_dirent *)((u8 *)last_de + last_actual);
+		new_de->inode = ino;
+		new_de->name_len = (u8)namelen;
+		new_de->file_type = file_type;
+		new_de->rec_len = remain;
+		memcpy(new_de->name, name, namelen);
+
+		if (ext4_write_at(sbi->dev, (u64)last_phys_block * block_size, buf,
+				 block_size) < 0) {
+			kfree(buf);
+			return -EIO;
+		}
+
+		if (new_off + remain > dir->i_size) {
+			u64 new_size = new_off + remain;
+			dir->i_size = new_size;
+			raw->i_size_lo = (u32)(new_size & 0xFFFFFFFF);
+			raw->i_size_high = (u32)(new_size >> 32);
+		}
+	} else {
+		u32 phys_block = raw->i_block[0];
+		if (phys_block == 0) {
+			phys_block = ext4_alloc_block(dir->i_sb);
+			if (phys_block == 0) {
+				kfree(buf);
+				return -ENOSPC;
+			}
+			raw->i_block[0] = phys_block;
+		}
+
+		memset(buf, 0, block_size);
+		struct ext4_dirent *new_de = (struct ext4_dirent *)buf;
+		new_de->inode = ino;
+		new_de->name_len = (u8)namelen;
+		new_de->file_type = file_type;
+		new_de->rec_len = block_size;
+		memcpy(new_de->name, name, namelen);
+
+		if (ext4_write_at(sbi->dev, (u64)phys_block * block_size, buf,
+				 block_size) < 0) {
+			kfree(buf);
+			return -EIO;
+		}
+
+		dir->i_size = block_size;
+		raw->i_size_lo = block_size;
+		raw->i_size_high = 0;
+	}
+
+	inode_dirty(dir);
+	kfree(buf);
+	return 0;
 }
 
 /* inode_operations: unlink (remove a directory entry) */
@@ -1094,6 +1154,59 @@ static int ext4_rmdir(struct inode *dir, struct dentry *dentry)
 	return ext4_unlink(dir, dentry);
 }
 
+static int ext4_rename(struct inode *old_dir, struct dentry *old_dentry,
+		       struct inode *new_dir, struct dentry *new_dentry)
+{
+	int ret;
+
+	if (!old_dir || !old_dentry || !new_dir || !new_dentry || !old_dentry->d_inode)
+		return -EINVAL;
+	if (old_dir != new_dir)
+		return -EXDEV;
+
+	u32 existing_ino = ext4_dir_lookup(new_dir->i_sb,
+					   (struct ext4_inode *)new_dir->i_private,
+					   new_dentry->d_name.name,
+					   new_dentry->d_name.len);
+	if (existing_ino != 0) {
+		struct inode *existing_inode = inode_get(new_dir->i_sb, existing_ino);
+		if (!existing_inode)
+			return -ENOMEM;
+		if (!existing_inode->i_private) {
+			ret = ext4_read_inode(new_dir->i_sb, existing_inode);
+			if (ret < 0) {
+				inode_put(existing_inode);
+				return ret;
+			}
+		}
+		new_dentry->d_inode = existing_inode;
+		ret = ext4_unlink(new_dir, new_dentry);
+		inode_put(existing_inode);
+		new_dentry->d_inode = NULL;
+		if (ret < 0)
+			return ret;
+	}
+
+	ret = ext4_add_dir_entry(new_dir, old_dentry->d_inode->i_ino,
+				 new_dentry->d_name.name, new_dentry->d_name.len,
+				 S_ISDIR(old_dentry->d_inode->i_mode) ?
+					 EXT4_FT_DIR :
+					 EXT4_FT_REG_FILE);
+	if (ret < 0)
+		return ret;
+
+	ret = ext4_unlink(old_dir, old_dentry);
+	if (ret < 0)
+		return ret;
+
+	new_dentry->d_inode = old_dentry->d_inode;
+	spinlock_acquire(&new_dentry->d_inode->i_lock);
+	new_dentry->d_inode->i_refcnt++;
+	spinlock_release(&new_dentry->d_inode->i_lock);
+	inode_dirty(new_dir);
+	return 0;
+}
+
 /* inode_operations: create (regular file) */
 static int ext4_create(struct inode *dir, struct dentry *dentry, umode_t mode)
 {
@@ -1128,22 +1241,24 @@ static int ext4_create(struct inode *dir, struct dentry *dentry, umode_t mode)
                 ext4_write_at(sbi->dev, inode_off, &raw_inode, sizeof(raw_inode));
         }
 
-        /* Add entry to parent directory */
-        ext4_add_dir_entry(dir, ino, dentry->d_name.name, dentry->d_name.len,
-                           EXT4_FT_REG_FILE);
+	/* Add entry to parent directory */
+	int ret = ext4_add_dir_entry(dir, ino, dentry->d_name.name, dentry->d_name.len,
+				    EXT4_FT_REG_FILE);
+	if (ret < 0)
+		return ret;
 
         /* Create VFS inode and associate with dentry */
         struct inode *child_inode = inode_get(sb, ino);
         if (!child_inode)
                 return -ENOMEM;
 
-        if (!child_inode->i_private) {
-                int ret = ext4_read_inode(sb, child_inode);
-                if (ret < 0) {
-                        inode_put(child_inode);
-                        return ret;
-                }
-        }
+	if (!child_inode->i_private) {
+		ret = ext4_read_inode(sb, child_inode);
+		if (ret < 0) {
+			inode_put(child_inode);
+			return ret;
+		}
+	}
 
         child_inode->i_op   = NULL;
         child_inode->i_fop  = &ext4_file_operations;
@@ -1229,8 +1344,10 @@ static int ext4_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 	kfree(dir_data);
 
 	/* Add entry to parent directory */
-	ext4_add_dir_entry(dir, ino, dentry->d_name.name, dentry->d_name.len,
-			   EXT4_FT_DIR);
+	int ret = ext4_add_dir_entry(dir, ino, dentry->d_name.name, dentry->d_name.len,
+				     EXT4_FT_DIR);
+	if (ret < 0)
+		return ret;
 
 	/* Update parent inode */
 	struct ext4_inode *parent_raw = (struct ext4_inode *)dir->i_private;
@@ -1244,7 +1361,7 @@ static int ext4_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 		return -ENOMEM;
 
 	if (!child_inode->i_private) {
-		int ret = ext4_read_inode(sb, child_inode);
+		ret = ext4_read_inode(sb, child_inode);
 		if (ret < 0) {
 			inode_put(child_inode);
 			return ret;

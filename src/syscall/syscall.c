@@ -85,6 +85,22 @@ syscall_fn_t syscall_lookup(int nr)
 
 static inline struct proc *curproc(void) { return thiscpu()->proc; }
 
+static struct proc *find_child_by_pid(struct proc *parent, int pid)
+{
+	struct list_head *pos;
+
+	if (!parent)
+		return NULL;
+
+	list_for_each(pos, &parent->children) {
+		struct proc *child = list_entry(pos, struct proc, sibling);
+		if (child->pid == pid)
+			return child;
+	}
+
+	return NULL;
+}
+
 struct kernel_timespec {
 	long tv_sec;
 	long tv_nsec;
@@ -1215,10 +1231,8 @@ uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 	char **saved_argv = NULL, **saved_envp = NULL;
 	int saved_argc = 0, saved_envc = 0;
 	{
-		if (!is_shebang) {
-			saved_argc = copyin_str_array(p->pagetable, argv, &saved_argv, 32);
-			if (saved_argc < 0) { file_put(f); return saved_argc; }
-		}
+		saved_argc = copyin_str_array(p->pagetable, argv, &saved_argv, 32);
+		if (saved_argc < 0) { file_put(f); return saved_argc; }
 		saved_envc = copyin_str_array(p->pagetable, envp, &saved_envp, 32);
 		if (saved_envc < 0) { file_put(f); return saved_envc; }
 	}
@@ -1361,14 +1375,19 @@ uintptr_t sys_execve(uintptr_t filename, uintptr_t argv, uintptr_t envp)
 	int max_argv = 0;
 	{
 		if (is_shebang) {
-			/* shebang argv = [path, arg?, script] */
-			final_argc = shebang_arg[0] ? 3 : 2;
+			int extra_argc = saved_argc > 1 ? saved_argc - 1 : 0;
+
+			/* shebang argv = [interp, arg?, script, original argv[1..]] */
+			final_argc = (shebang_arg[0] ? 3 : 2) + extra_argc;
 			argv_strs = kmalloc(final_argc * sizeof(uintptr_t));
 			if (!argv_strs) return -ENOMEM;
 			argv_strs[0] = (uintptr_t)path;	      /* interpreter path */
+			int argi = 1;
 			if (shebang_arg[0])
-				argv_strs[1] = (uintptr_t)shebang_arg;
-			argv_strs[final_argc - 1] = (uintptr_t)shebang_script;
+				argv_strs[argi++] = (uintptr_t)shebang_arg;
+			argv_strs[argi++] = (uintptr_t)shebang_script;
+			for (int i = 1; i < saved_argc; i++)
+				argv_strs[argi++] = (uintptr_t)saved_argv[i];
 		} else {
 			final_argc = saved_argc;
 			argv_strs = kmalloc((final_argc + 1) * sizeof(uintptr_t));
@@ -2224,6 +2243,119 @@ uintptr_t sys_utimensat(uintptr_t dirfd, uintptr_t pathname, uintptr_t times,
 	return 0;
 }
 
+uintptr_t sys_renameat(uintptr_t olddirfd, uintptr_t oldpath, uintptr_t newdirfd,
+		       uintptr_t newpath)
+{
+	struct proc *p = curproc();
+	char old_kpath[256];
+	char new_kpath[256];
+	struct file *old_dir_file = NULL;
+	struct file *new_dir_file = NULL;
+	struct dentry *old_base;
+	struct dentry *new_base;
+	int ret;
+
+	if (copyinstr(p->pagetable, old_kpath, oldpath, sizeof(old_kpath)) < 0)
+		return -EFAULT;
+	if (copyinstr(p->pagetable, new_kpath, newpath, sizeof(new_kpath)) < 0)
+		return -EFAULT;
+
+	old_base = resolve_dirfd_base(p, (long)olddirfd, old_kpath, &old_dir_file);
+	new_base = resolve_dirfd_base(p, (long)newdirfd, new_kpath, &new_dir_file);
+	ret = vfs_rename_cwd(old_kpath, new_kpath, old_base, new_base);
+
+	if (old_dir_file)
+		file_put(old_dir_file);
+	if (new_dir_file)
+		file_put(new_dir_file);
+
+	return ret;
+}
+
+struct kernel_statx {
+	u32 stx_mask;
+	u32 stx_blksize;
+	u64 stx_attributes;
+	u32 stx_nlink;
+	u32 stx_uid;
+	u32 stx_gid;
+	u16 stx_mode;
+	u16 __spare0[1];
+	u64 stx_ino;
+	u64 stx_size;
+	u64 stx_blocks;
+	u64 stx_attributes_mask;
+	struct {
+		s64 tv_sec;
+		u32 tv_nsec;
+		s32 __reserved;
+	} stx_atime, stx_btime, stx_ctime, stx_mtime;
+	u32 stx_rdev_major;
+	u32 stx_rdev_minor;
+	u32 stx_dev_major;
+	u32 stx_dev_minor;
+	u64 stx_mnt_id;
+	u32 stx_dio_mem_align;
+	u32 stx_dio_offset_align;
+	u64 __spare3[12];
+};
+
+uintptr_t sys_statx(int dirfd, uintptr_t pathname, uintptr_t flags,
+		    uintptr_t mask, uintptr_t statxbuf)
+{
+	struct proc *p = curproc();
+	char path[256];
+	struct file *dir_file = NULL;
+	struct dentry *base;
+	struct dentry *d;
+	struct inode *inode;
+	struct kernel_statx stx;
+
+	(void)flags;
+	(void)mask;
+
+	if (copyinstr(p->pagetable, path, pathname, sizeof(path)) < 0)
+		return -EFAULT;
+
+	base = resolve_dirfd_base(p, dirfd, path, &dir_file);
+	d = vfs_path_lookup(base, path, 0);
+	if (dir_file)
+		file_put(dir_file);
+	if (IS_ERR(d))
+		return PTR_ERR(d);
+
+	inode = d->d_inode;
+	if (!inode) {
+		dentry_put(d);
+		return -ENOENT;
+	}
+
+	memset(&stx, 0, sizeof(stx));
+	stx.stx_mask = 0x00000fff;
+	stx.stx_blksize = 1024;
+	stx.stx_nlink = inode->i_nlink;
+	stx.stx_uid = inode->i_uid;
+	stx.stx_gid = inode->i_gid;
+	stx.stx_mode = inode->i_mode;
+	stx.stx_ino = inode->i_ino;
+	stx.stx_size = inode->i_size;
+	stx.stx_blocks = inode->i_blocks;
+	stx.stx_atime.tv_sec = inode->i_atime;
+	stx.stx_mtime.tv_sec = inode->i_mtime;
+	stx.stx_ctime.tv_sec = inode->i_ctime;
+	stx.stx_dev_major = MAJOR(inode->i_sb ? inode->i_sb->s_dev : 0);
+	stx.stx_dev_minor = MINOR(inode->i_sb ? inode->i_sb->s_dev : 0);
+	stx.stx_rdev_major = MAJOR(inode->i_rdev);
+	stx.stx_rdev_minor = MINOR(inode->i_rdev);
+
+	dentry_put(d);
+
+	if (copyout(p->pagetable, statxbuf, (char *)&stx, sizeof(stx)) < 0)
+		return -EFAULT;
+
+	return 0;
+}
+
 /* ============================================================
  * Signals (stub)
  * ============================================================ */
@@ -2801,9 +2933,49 @@ uintptr_t sys_tgkill(int tgid, int tid, int sig)
 
 uintptr_t sys_kill(int pid, int sig)
 {
-	(void)pid;
-	(void)sig;
-	return 0;
+	struct proc *self = curproc();
+	struct proc *target;
+
+	if (sig == 0)
+		return 0;
+
+	if (pid <= 0)
+		return -EINVAL;
+
+	if (pid == self->pid)
+		target = self;
+	else {
+		target = find_child_by_pid(self, pid);
+		if (!target && self->parent)
+			target = find_child_by_pid(self->parent, pid);
+	}
+
+	if (!target)
+		return -ESRCH;
+
+	switch (sig) {
+	case 9:
+	case 15:
+		if (!list_empty(&target->runq)) {
+			list_del(&target->runq);
+			INIT_LIST_HEAD(&target->runq);
+		}
+		target->exit_code = -sig;
+		target->state = PROC_ZOMBIE;
+		if (target->fd_table) {
+			fd_table_free(target->fd_table);
+			target->fd_table = NULL;
+		}
+		if (target->parent)
+			wait_queue_wakeup_one(&target->parent->child_wait);
+		if (target == self) {
+			sched_yield();
+			panic("unreachable");
+		}
+		return 0;
+	default:
+		return 0;
+	}
 }
 
 /* ============================================================
@@ -2830,11 +3002,67 @@ uintptr_t sys_readlinkat(int dirfd, uintptr_t pathname, uintptr_t buf, uintptr_t
 
 uintptr_t sys_sendfile(int out_fd, int in_fd, uintptr_t offset, uintptr_t count)
 {
-	(void)out_fd;
-	(void)in_fd;
-	(void)offset;
-	(void)count;
-	return -EINVAL;
+	struct proc *p = curproc();
+	struct file *in;
+	struct file *out;
+	loff_t pos;
+	loff_t off_val = 0;
+	ssize_t total = 0;
+	char buf[512];
+
+	in = fd_get(p->fd_table, in_fd);
+	if (!in)
+		return -EBADF;
+	out = fd_get(p->fd_table, out_fd);
+	if (!out) {
+		file_put(in);
+		return -EBADF;
+	}
+
+	if (offset) {
+		if (copyin(p->pagetable, (char *)&off_val, offset, sizeof(off_val)) < 0) {
+			file_put(out);
+			file_put(in);
+			return -EFAULT;
+		}
+		pos = off_val;
+	} else {
+		pos = in->f_pos;
+	}
+	while (total < count) {
+		size_t chunk = count - total;
+		ssize_t nr;
+		ssize_t nw;
+		if (chunk > sizeof(buf))
+			chunk = sizeof(buf);
+
+		nr = in->f_op && in->f_op->read ? in->f_op->read(in, buf, chunk, &pos) :
+						  file_read(in, buf, chunk);
+		if (nr <= 0)
+			break;
+		nw = file_write(out, buf, nr);
+		if (nw < 0) {
+			total = total ? total : nw;
+			break;
+		}
+		total += nw;
+		if (nw < nr)
+			break;
+	}
+
+	if (offset) {
+		if (copyout(p->pagetable, offset, (char *)&pos, sizeof(pos)) < 0) {
+			file_put(out);
+			file_put(in);
+			return total > 0 ? (uintptr_t)total : (uintptr_t)-EFAULT;
+		}
+	} else {
+		in->f_pos = pos;
+	}
+
+	file_put(out);
+	file_put(in);
+	return total;
 }
 
 uintptr_t sys_syslog(int type, uintptr_t buf, int len)
@@ -2945,12 +3173,15 @@ void syscall_init(void)
 	/* 文件系统 */
 	syscall_register(SYS_mkdirat,     (syscall_fn_t)sys_mkdirat);
 	syscall_register(SYS_unlinkat,    (syscall_fn_t)sys_unlinkat);
+	syscall_register(SYS_renameat,    (syscall_fn_t)sys_renameat);
+	syscall_register(SYS_renameat2,   (syscall_fn_t)sys_renameat);
 	syscall_register(SYS_utimensat,   (syscall_fn_t)sys_utimensat);
 	syscall_register(SYS_symlinkat,   (syscall_fn_t)sys_symlinkat);
 	syscall_register(SYS_getcwd,      (syscall_fn_t)sys_getcwd);
 	syscall_register(SYS_chdir,       (syscall_fn_t)sys_chdir);
 	syscall_register(SYS_fstat,       (syscall_fn_t)sys_fstat);
 	syscall_register(SYS_fstatat,     (syscall_fn_t)sys_fstatat);
+	syscall_register(SYS_statx,       (syscall_fn_t)sys_statx);
 	syscall_register(SYS_mount,       (syscall_fn_t)sys_mount);
 	syscall_register(SYS_umount,      (syscall_fn_t)sys_umount);
 

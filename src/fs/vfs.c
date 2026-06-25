@@ -882,19 +882,25 @@ int vfs_create(const char *path, umode_t mode)
  */
 int vfs_rename(const char *old_path, const char *new_path)
 {
+	return vfs_rename_cwd(old_path, new_path, NULL, NULL);
+}
+
+int vfs_rename_cwd(const char *old_path, const char *new_path,
+		   struct dentry *old_base, struct dentry *new_base)
+{
 	if (!old_path || !new_path) {
 		return -EINVAL;
 	}
 
 	struct dentry *old_dentry =
-	    vfs_path_lookup(NULL, old_path, LOOKUP_FOLLOW);
+	    vfs_path_lookup(old_base, old_path, LOOKUP_FOLLOW);
 	if (IS_ERR(old_dentry)) {
 		return PTR_ERR(old_dentry);
 	}
 
 	struct path new_parent;
 	struct qstr new_last;
-	int ret = vfs_path_parent(NULL, new_path, &new_parent, &new_last);
+	int ret = vfs_path_parent(new_base, new_path, &new_parent, &new_last);
 	if (ret < 0) {
 		dentry_put(old_dentry);
 		return ret;

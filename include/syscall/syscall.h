@@ -41,6 +41,10 @@ uintptr_t sys_mkdirat(uintptr_t dirfd, uintptr_t pathname, uintptr_t mode);
 uintptr_t sys_unlinkat(uintptr_t dirfd, uintptr_t pathname, uintptr_t flags);
 uintptr_t sys_utimensat(uintptr_t dirfd, uintptr_t pathname, uintptr_t times,
 			uintptr_t flags);
+uintptr_t sys_renameat(uintptr_t olddirfd, uintptr_t oldpath, uintptr_t newdirfd,
+		       uintptr_t newpath);
+uintptr_t sys_statx(int dirfd, uintptr_t pathname, uintptr_t flags,
+		    uintptr_t mask, uintptr_t statxbuf);
 
 /* 信号（stub） */
 uintptr_t sys_rt_sigaction(int sig, uintptr_t act, uintptr_t oact, size_t sigsetsize);
