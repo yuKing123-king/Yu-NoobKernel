@@ -194,6 +194,48 @@ static int ext4_write_group_desc(struct ext4_sb_info *sbi, u32 bg_idx,
 	return ext4_write_at(sbi->dev, offset, bgd, sizeof(*bgd));
 }
 
+static int ext4_append_block_to_inode(struct inode *inode, u32 logical_block,
+					 u32 phys_block)
+{
+	struct ext4_inode *raw = (struct ext4_inode *)inode->i_private;
+
+	if (raw->i_flags & EXT4_EXTENTS_FL) {
+		struct ext4_extent_header *eh =
+			(struct ext4_extent_header *)raw->i_block;
+		struct ext4_extent *ext;
+
+		if (eh->eh_magic != EXT4_EXTENT_MAGIC || eh->eh_depth != 0)
+			return -ENOSPC;
+		if (eh->eh_entries >= eh->eh_max)
+			return -ENOSPC;
+
+		ext = (struct ext4_extent *)(eh + 1);
+		if (eh->eh_entries > 0) {
+			struct ext4_extent *last = &ext[eh->eh_entries - 1];
+			u32 last_start = last->ee_start_lo |
+					 ((u32)last->ee_start_hi << 16);
+			u32 last_end = last->ee_block + last->ee_len;
+			if (last_end == logical_block &&
+			    last_start + last->ee_len == phys_block) {
+				last->ee_len++;
+				return 0;
+			}
+		}
+
+		ext = &ext[eh->eh_entries++];
+		ext->ee_block = logical_block;
+		ext->ee_len = 1;
+		ext->ee_start_hi = (u16)(phys_block >> 16);
+		ext->ee_start_lo = phys_block;
+		return 0;
+	}
+
+	if (logical_block >= EXT4_DIRECT_BLOCKS)
+		return -ENOSPC;
+	raw->i_block[logical_block] = phys_block;
+	return 0;
+}
+
 /* Allocate a free inode number from the inode bitmap.
    Returns inode number on success, 0 on failure. */
 static u32 ext4_alloc_inode_from_disk(struct super_block *sb)
@@ -1003,33 +1045,66 @@ static int ext4_add_dir_entry(struct inode *dir, u32 ino, const char *name,
 		}
 
 		remain = last_de->rec_len - last_actual;
-		if (remain < new_rec_len) {
-			kfree(buf);
-			return -ENOSPC;
-		}
+		if (remain >= new_rec_len) {
+			new_off = last_off + last_actual;
+			last_de->rec_len = last_actual;
 
-		new_off = last_off + last_actual;
-		last_de->rec_len = last_actual;
+			struct ext4_dirent *new_de =
+				(struct ext4_dirent *)((u8 *)last_de + last_actual);
+			new_de->inode = ino;
+			new_de->name_len = (u8)namelen;
+			new_de->file_type = file_type;
+			new_de->rec_len = remain;
+			memcpy(new_de->name, name, namelen);
 
-		struct ext4_dirent *new_de =
-			(struct ext4_dirent *)((u8 *)last_de + last_actual);
-		new_de->inode = ino;
-		new_de->name_len = (u8)namelen;
-		new_de->file_type = file_type;
-		new_de->rec_len = remain;
-		memcpy(new_de->name, name, namelen);
+			if (ext4_write_at(sbi->dev,
+					  (u64)last_phys_block * block_size,
+					  buf, block_size) < 0) {
+				kfree(buf);
+				return -EIO;
+			}
 
-		if (ext4_write_at(sbi->dev, (u64)last_phys_block * block_size, buf,
-				 block_size) < 0) {
-			kfree(buf);
-			return -EIO;
-		}
+			if (new_off + remain > dir->i_size) {
+				u64 new_size = new_off + remain;
+				dir->i_size = new_size;
+				raw->i_size_lo = (u32)(new_size & 0xFFFFFFFF);
+				raw->i_size_high = (u32)(new_size >> 32);
+			}
+		} else {
+			u32 logical_block = (u32)(dir->i_size / block_size);
+			u32 phys_block = ext4_alloc_block(dir->i_sb);
+			struct ext4_dirent *new_de;
+			int ret;
 
-		if (new_off + remain > dir->i_size) {
-			u64 new_size = new_off + remain;
-			dir->i_size = new_size;
-			raw->i_size_lo = (u32)(new_size & 0xFFFFFFFF);
-			raw->i_size_high = (u32)(new_size >> 32);
+			if (phys_block == 0) {
+				kfree(buf);
+				return -ENOSPC;
+			}
+
+			ret = ext4_append_block_to_inode(dir, logical_block, phys_block);
+			if (ret < 0) {
+				kfree(buf);
+				return ret;
+			}
+
+			memset(buf, 0, block_size);
+			new_de = (struct ext4_dirent *)buf;
+			new_de->inode = ino;
+			new_de->name_len = (u8)namelen;
+			new_de->file_type = file_type;
+			new_de->rec_len = block_size;
+			memcpy(new_de->name, name, namelen);
+
+			if (ext4_write_at(sbi->dev, (u64)phys_block * block_size,
+					  buf, block_size) < 0) {
+				kfree(buf);
+				return -EIO;
+			}
+
+			dir->i_size += block_size;
+			raw->i_size_lo = (u32)(dir->i_size & 0xFFFFFFFF);
+			raw->i_size_high = (u32)(dir->i_size >> 32);
+			raw->i_blocks_lo += block_size / 512;
 		}
 	} else {
 		u32 phys_block = raw->i_block[0];
