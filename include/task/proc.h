@@ -114,7 +114,9 @@ struct proc {
 	uintptr_t brk_end;
 	struct wait_queue child_wait;
 	bool vm_shared;		/* CLONE_VM: pagetable shared with parent */
+	spinlock_t vm_lock;	/* serializes shared address-space updates */
 	int *clear_child_tid;	/* set_tid_address: futex word to clear on exit */
+	uintptr_t futex_uaddr;	/* FUTEX_WAIT: keyed wait address inside hash bucket */
 
 	struct fd_table *fd_table;
 	struct dentry *pwd;

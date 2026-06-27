@@ -20,9 +20,10 @@ void wait_queue_sleep(struct wait_queue *wq, struct proc *p)
 	sched_yield();
 }
 
-static void wait_queue_wakeup(struct wait_queue *wq, int all)
+static int wait_queue_wakeup(struct wait_queue *wq, int nr)
 {
 	struct proc *waken = NULL;
+	int count = 0;
 
 	spinlock_acquire(&wq->lock);
 	while (!list_empty(&wq->list)) {
@@ -32,7 +33,8 @@ static void wait_queue_wakeup(struct wait_queue *wq, int all)
 		p->state = PROC_RUNNABLE;
 		enqueue_proc(r_tp(), p);
 		waken = p;
-		if (!all)
+		count++;
+		if (nr > 0 && count >= nr)
 			break;
 	}
 	spinlock_release(&wq->lock);
@@ -40,16 +42,72 @@ static void wait_queue_wakeup(struct wait_queue *wq, int all)
 	if (waken) {
 		thiscpu()->need_resched = true;
 	}
+	return count;
 }
 
 void wait_queue_wakeup_one(struct wait_queue *wq)
 {
-	wait_queue_wakeup(wq, 0);
+	wait_queue_wakeup(wq, 1);
 }
 
 void wait_queue_wakeup_all(struct wait_queue *wq)
 {
-	wait_queue_wakeup(wq, 1);
+	wait_queue_wakeup(wq, -1);
+}
+
+int wait_queue_wakeup_n(struct wait_queue *wq, int nr)
+{
+	if (nr <= 0)
+		return 0;
+	return wait_queue_wakeup(wq, nr);
+}
+
+int wait_queue_wakeup_addr(struct wait_queue *wq, uintptr_t uaddr, int nr)
+{
+	struct proc *waken = NULL;
+	struct list_head *pos, *n;
+	int count = 0;
+
+	if (nr <= 0)
+		return 0;
+
+	spinlock_acquire(&wq->lock);
+	list_for_each_safe(pos, n, &wq->list) {
+		struct proc *p = list_entry(pos, struct proc, runq);
+
+		if (p->futex_uaddr != uaddr)
+			continue;
+
+		list_del(pos);
+		p->state = PROC_RUNNABLE;
+		p->futex_uaddr = 0;
+		enqueue_proc(r_tp(), p);
+		waken = p;
+		count++;
+		if (count >= nr)
+			break;
+	}
+	spinlock_release(&wq->lock);
+
+	if (waken)
+		thiscpu()->need_resched = true;
+	return count;
+}
+
+int wait_queue_count_addr(struct wait_queue *wq, uintptr_t uaddr)
+{
+	struct list_head *pos;
+	int count = 0;
+
+	spinlock_acquire(&wq->lock);
+	list_for_each(pos, &wq->list) {
+		struct proc *p = list_entry(pos, struct proc, runq);
+
+		if (p->futex_uaddr == uaddr)
+			count++;
+	}
+	spinlock_release(&wq->lock);
+	return count;
 }
 
 /*

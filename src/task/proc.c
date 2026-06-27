@@ -99,6 +99,7 @@ struct proc *alloc_proc()
 	INIT_LIST_HEAD(&p->sibling);
 
 	p->lock = (spinlock_t)SPINLOCK_INITIALIZER("proc");
+	p->vm_lock = (spinlock_t)SPINLOCK_INITIALIZER("vm");
 
 	wait_queue_init(&p->child_wait);
 
@@ -140,8 +141,9 @@ void free_proc(struct proc *p)
 	if (p->tf)
 		kfree(p->tf);
 
-	if (p->pagetable && p->pagetable != kpagetable && !p->vm_shared) {
-		uvm_free_user_pages(p->pagetable);
+	if (p->pagetable && p->pagetable != kpagetable) {
+		if (!p->vm_shared)
+			uvm_free_user_pages(p->pagetable);
 		pagetable_destroy(p->pagetable);
 	}
 
