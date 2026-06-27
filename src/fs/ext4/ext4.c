@@ -194,6 +194,11 @@ static int ext4_write_group_desc(struct ext4_sb_info *sbi, u32 bg_idx,
 	return ext4_write_at(sbi->dev, offset, bgd, sizeof(*bgd));
 }
 
+static u32 ext4_alloc_block(struct super_block *sb);
+static u32 ext4_find_extent_block(struct ext4_sb_info *sbi,
+				  struct ext4_inode *raw_inode,
+				  u32 logical_block);
+
 static int ext4_append_block_to_inode(struct inode *inode, u32 logical_block,
 					 u32 phys_block)
 {
@@ -234,6 +239,98 @@ static int ext4_append_block_to_inode(struct inode *inode, u32 logical_block,
 		return -ENOSPC;
 	raw->i_block[logical_block] = phys_block;
 	return 0;
+}
+
+static u32 ext4_get_indirect_block_entry(struct ext4_sb_info *sbi,
+					 struct ext4_inode *raw_inode,
+					 u32 logical_block)
+{
+	u32 block_size = sbi->block_size;
+	u32 entries_per_block = block_size / sizeof(u32);
+	u32 indirect_block;
+	u32 *table;
+	u32 phys_block;
+
+	if (logical_block < EXT4_DIRECT_BLOCKS)
+		return raw_inode->i_block[logical_block];
+
+	logical_block -= EXT4_DIRECT_BLOCKS;
+	if (logical_block >= entries_per_block)
+		return ~0U;
+
+	indirect_block = raw_inode->i_block[EXT4_DIRECT_BLOCKS];
+	if (indirect_block == 0)
+		return 0;
+
+	table = kzalloc(block_size);
+	if (!table)
+		return ~0U;
+
+	if (ext4_read_at(sbi->dev, (u64)indirect_block * block_size,
+			 table, block_size) < 0) {
+		kfree(table);
+		return ~0U;
+	}
+
+	phys_block = table[logical_block];
+	kfree(table);
+	return phys_block;
+}
+
+static int ext4_set_indirect_block_entry(struct super_block *sb,
+					 struct ext4_inode *raw_inode,
+					 u32 logical_block,
+					 u32 phys_block)
+{
+	struct ext4_sb_info *sbi = ext4_get_sbi(sb);
+	u32 block_size = sbi->block_size;
+	u32 entries_per_block = block_size / sizeof(u32);
+	u32 indirect_block;
+	u32 *table;
+	int ret;
+
+	if (logical_block < EXT4_DIRECT_BLOCKS) {
+		raw_inode->i_block[logical_block] = phys_block;
+		return 0;
+	}
+
+	logical_block -= EXT4_DIRECT_BLOCKS;
+	if (logical_block >= entries_per_block)
+		return -ENOSPC;
+
+	indirect_block = raw_inode->i_block[EXT4_DIRECT_BLOCKS];
+	if (indirect_block == 0) {
+		indirect_block = ext4_alloc_block(sb);
+		if (indirect_block == 0)
+			return -ENOSPC;
+		raw_inode->i_block[EXT4_DIRECT_BLOCKS] = indirect_block;
+	}
+
+	table = kzalloc(block_size);
+	if (!table)
+		return -ENOMEM;
+
+	ret = ext4_read_at(sbi->dev, (u64)indirect_block * block_size,
+			   table, block_size);
+	if (ret < 0) {
+		kfree(table);
+		return ret;
+	}
+
+	table[logical_block] = phys_block;
+	ret = ext4_write_at(sbi->dev, (u64)indirect_block * block_size,
+			    table, block_size);
+	kfree(table);
+	return ret;
+}
+
+static u32 ext4_get_file_block(struct ext4_sb_info *sbi,
+			       struct ext4_inode *raw_inode,
+			       u32 logical_block)
+{
+	if (raw_inode->i_flags & EXT4_EXTENTS_FL)
+		return ext4_find_extent_block(sbi, raw_inode, logical_block);
+	return ext4_get_indirect_block_entry(sbi, raw_inode, logical_block);
 }
 
 /* Allocate a free inode number from the inode bitmap.
@@ -546,19 +643,10 @@ static ssize_t ext4_read_data(struct super_block *sb,
 		if (to_copy > len) to_copy = len;
 
 		/* Find physical block */
-		u32 phys_block;
-		if (raw_inode->i_flags & EXT4_EXTENTS_FL) {
-			phys_block = ext4_find_extent_block(
-				sbi, raw_inode, logical_block);
-		} else {
-			/* Direct blocks only (for non-extent files) */
-			if (logical_block < EXT4_DIRECT_BLOCKS) {
-				phys_block = raw_inode->i_block[logical_block];
-			} else {
-				warnf("ext4: indirect blocks not supported");
-				return total > 0 ? total : -ENOSYS;
-			}
-		}
+		u32 phys_block = ext4_get_file_block(sbi, raw_inode,
+						     logical_block);
+		if (phys_block == ~0U)
+			return total > 0 ? total : -ENOSYS;
 
 		if (phys_block == ~0U) {
 			/* Sparse hole: zero-fill and continue */
@@ -856,14 +944,11 @@ static ssize_t ext4_write_file(struct file *file, const void *buf,
 		if (n > count)
 			n = count;
 
-		/* Only direct blocks supported */
-		if (lb >= EXT4_DIRECT_BLOCKS) {
-			errorf("ext4_write_file: indirect blocks not supported");
+		u32 pb = ext4_get_file_block(sbi, raw, lb);
+		if (pb == ~0U) {
 			total = total > 0 ? total : -ENOSPC;
 			break;
 		}
-
-		u32 pb = raw->i_block[lb];
 		if (pb == 0) {
 			pb = ext4_alloc_block(sb);
 			if (pb == 0) {
@@ -871,7 +956,10 @@ static ssize_t ext4_write_file(struct file *file, const void *buf,
 				total = total > 0 ? total : -ENOSPC;
 				break;
 			}
-			raw->i_block[lb] = pb;
+			if (ext4_set_indirect_block_entry(sb, raw, lb, pb) < 0) {
+				total = total > 0 ? total : -ENOSPC;
+				break;
+			}
 		}
 
 		/* Write the block (whole or partial) */
@@ -907,6 +995,23 @@ static ssize_t ext4_write_file(struct file *file, const void *buf,
 		for (int i = 0; i < EXT4_DIRECT_BLOCKS; i++) {
 			if (raw->i_block[i] != 0)
 				alloc_blocks++;
+		}
+		if (raw->i_block[EXT4_DIRECT_BLOCKS] != 0) {
+			u32 *table = kzalloc(block_size);
+			if (table) {
+				if (ext4_read_at(sbi->dev,
+						 (u64)raw->i_block[EXT4_DIRECT_BLOCKS] *
+						 block_size,
+						 table, block_size) == 0) {
+					u32 entries_per_block = block_size / sizeof(u32);
+					for (u32 i = 0; i < entries_per_block; i++) {
+						if (table[i] != 0)
+							alloc_blocks++;
+					}
+					alloc_blocks++;
+				}
+				kfree(table);
+			}
 		}
 		raw->i_blocks_lo = alloc_blocks * (block_size / 512);
 
@@ -979,12 +1084,7 @@ static int ext4_add_dir_entry(struct inode *dir, u32 ino, const char *name,
 		u64 byte_off;
 		u32 block_off = (u32)(offset % block_size);
 
-		if (raw->i_flags & EXT4_EXTENTS_FL)
-			phys_block = ext4_find_extent_block(sbi, raw, logical_block);
-		else if (logical_block < EXT4_DIRECT_BLOCKS)
-			phys_block = raw->i_block[logical_block];
-		else
-			phys_block = ~0U;
+		phys_block = ext4_get_file_block(sbi, raw, logical_block);
 
 		if (phys_block == 0 || phys_block == ~0U) {
 			offset = ((offset / block_size) + 1) * block_size;
@@ -1194,14 +1294,8 @@ static int ext4_unlink(struct inode *dir, struct dentry *dentry)
                 u32 blocks = (u32)((dir_size + block_size - 1) / block_size);
                 for (u32 logical_block = 0; logical_block < blocks; logical_block++) {
                         u32 phys_block;
-                        if (raw->i_flags & EXT4_EXTENTS_FL) {
-                                phys_block = ext4_find_extent_block(sbi, raw,
-                                                                    logical_block);
-                        } else if (logical_block < EXT4_DIRECT_BLOCKS) {
-                                phys_block = raw->i_block[logical_block];
-                        } else {
-                                phys_block = ~0U;
-                        }
+                        phys_block = ext4_get_file_block(sbi, raw,
+                                                         logical_block);
 
                         if (phys_block == 0 || phys_block == ~0U)
                                 continue;
