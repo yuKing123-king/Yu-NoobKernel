@@ -20,6 +20,7 @@ extern bool sched_enabled;
 extern void handle_timer(void);
 extern void handle_external(void);
 extern pagetable_t kpagetable;
+extern uintptr_t sys_exit(int status);
 
 /*
  * 处理外部中断（来自PLIC），根据中断号分发到对应设备的中断处理函数
@@ -193,9 +194,13 @@ void usertrap(void)
 			intr_off();
 			break;
 		default:
-			panic("usertrap: unexpected exception scause=%lx, "
-			      "sepc=%lx stval=%lx (pid %d %s)",
-			      scause, r_sepc(), r_stval(), p->pid, p->comm);
+			errorf("usertrap: killing process scause=%lx, "
+			       "sepc=%lx stval=%lx (pid %d %s sp=%lx tp=%lx s0=%lx s1=%lx a0=%lx a1=%lx)",
+			       scause, r_sepc(), r_stval(), p->pid, p->comm,
+			       p->tf ? p->tf->sp : 0, p->tf ? p->tf->tp : 0,
+			       p->tf ? p->tf->s0 : 0, p->tf ? p->tf->s1 : 0,
+			       p->tf ? p->tf->a0 : 0, p->tf ? p->tf->a1 : 0);
+			sys_exit(-1);
 		}
 	} else {
 		int irq = scause & 0x3FF;

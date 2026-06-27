@@ -68,44 +68,46 @@ kernelvec:
 #
 .globl kernelret
 kernelret:
+    mv t6, gp
+
     # 1. 恢复通用寄存器（顺序无关，因 gp 不变）
-    ld ra,  24(gp)
-    ld sp,  32(gp)      # ← 恢复中断前的 sp
-    ld gp,  40(gp)      # ← 恢复 gp（即新进程的 ktf 指针）
-    ld tp,  48(gp)
-    ld t0,  56(gp)
-    ld t1,  64(gp)
-    ld t2,  72(gp)
-    ld s0,  80(gp)
-    ld s1,  88(gp)
-    ld a0,  96(gp)
-    ld a1, 104(gp)
-    ld a2, 112(gp)
-    ld a3, 120(gp)
-    ld a4, 128(gp)
-    ld a5, 136(gp)
-    ld a6, 144(gp)
-    ld a7, 152(gp)
-    ld s2, 160(gp)
-    ld s3, 168(gp)
-    ld s4, 176(gp)
-    ld s5, 184(gp)
-    ld s6, 192(gp)
-    ld s7, 200(gp)
-    ld s8, 208(gp)
-    ld s9, 216(gp)
-    ld s10,224(gp)
-    ld s11,232(gp)
-    ld t3, 240(gp)
-    ld t4, 248(gp)
-    ld t5, 256(gp)
-    ld t6, 264(gp)
+    ld ra,  24(t6)
+    ld sp,  32(t6)      # ← 恢复中断前的 sp
+    ld gp,  40(t6)      # ← 恢复 gp（即新进程的 ktf 指针）
+    ld tp,  48(t6)
+    ld t0,  56(t6)
+    ld t1,  64(t6)
+    ld t2,  72(t6)
+    ld s0,  80(t6)
+    ld s1,  88(t6)
+    ld a0,  96(t6)
+    ld a1, 104(t6)
+    ld a2, 112(t6)
+    ld a3, 120(t6)
+    ld a4, 128(t6)
+    ld a5, 136(t6)
+    ld a6, 144(t6)
+    ld a7, 152(t6)
+    ld s2, 160(t6)
+    ld s3, 168(t6)
+    ld s4, 176(t6)
+    ld s5, 184(t6)
+    ld s6, 192(t6)
+    ld s7, 200(t6)
+    ld s8, 208(t6)
+    ld s9, 216(t6)
+    ld s10,224(t6)
+    ld s11,232(t6)
+    ld t3, 240(t6)
+    ld t4, 248(t6)
+    ld t5, 256(t6)
 
     # 2. 恢复 CSR
-    ld t0, 0(gp)        # sepc
-    ld t1, 8(gp)        # sstatus
+    ld t0, 0(t6)        # sepc
+    ld t1, 8(t6)        # sstatus
     csrw sepc, t0
     csrw sstatus, t1
+    ld t6, 264(t6)
 
     # 3. 返回 —— sp 已恢复为中断前栈，gp 为新进程 ktf
     sret
