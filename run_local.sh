@@ -31,7 +31,7 @@ esac
 # 评测机参数（可根据需要调整）
 MEM=${MEM:-"128M"}
 SMP=${SMP:-"1"}
-RUN_TIMEOUT=${RUN_TIMEOUT:-"240"}
+RUN_TIMEOUT=${RUN_TIMEOUT:-"600"}
 
 KERNEL="${KERNEL_DIR}/${KERNEL_BIN}"
 SDCARD="${SDCARD:-}"
@@ -134,7 +134,7 @@ EXIT_CODE=${PIPESTATUS[0]}
 
 echo ""
 if [ "$EXIT_CODE" -eq 124 ]; then
-    echo -e "${RED}[超时] QEMU 运行超过 120 秒，被强制终止${NC}"
+    echo -e "${RED}[超时] QEMU 运行超过 ${RUN_TIMEOUT} 秒，被强制终止${NC}"
 elif [ "$EXIT_CODE" -ne 0 ]; then
     echo -e "${RED}[退出码 $EXIT_CODE] QEMU 异常退出${NC}"
 else
