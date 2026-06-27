@@ -68,7 +68,7 @@ void *kmalloc(size_t size)
 	if (unlikely(size == 0)) {
 		return NULL;
 	}
-	if (size <= KALLOC_MAX_MEM_OBJ_SIZE) {
+	if (size < PAGE_SIZE) {
 		return kmem_cache_alloc(
 		    &kalloc_mem_pool[size2index(size)][r_tp()]);
 	} else if (size <= (PAGE_SIZE << BUDDY_MAX_ORDER)) {

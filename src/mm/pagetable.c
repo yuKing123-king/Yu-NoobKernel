@@ -51,6 +51,10 @@ uintptr_t walkaddr(pagetable_t pagetable, uintptr_t va)
 		return 0;
 	if ((*pte & PTE_V) == 0)
 		return 0;
+	if ((*pte & PTE_U) == 0)
+		return 0;
+	if ((*pte & (PTE_R | PTE_W | PTE_X)) == 0)
+		return 0;
 	pa = PTE2PA(*pte);
 	return pa;
 }

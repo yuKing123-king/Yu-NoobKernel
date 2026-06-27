@@ -223,6 +223,7 @@ static void *buddy_alloc_inner(u8 order)
 
 	page->private =
 	    NULL; // 这里把private设置为空表示此内存已不属于buddy管理
+	page->flags &= ~PM_SLAB;
 	addr = block->start;
 	list_del(&block->list);
 	free_mem_block(block);
@@ -290,6 +291,7 @@ void buddy_free(void *addr)
 	buddy_log("freed %p - %p", addr, addr + (PAGE_SIZE << page->order));
 	block->start = addr;
 	page->private = block;
+	page->flags &= ~PM_SLAB;
 	spinlock_acquire(&lock);
 	buddy_free_pages += (1 << page->order);
 	list_add(&block->list, &buddy_free_list[page->order]);
