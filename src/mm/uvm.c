@@ -322,3 +322,36 @@ int uvmcopy_tree(pagetable_t src, pagetable_t dst)
 		return -EINVAL;
 	return uvmcopy_tree_level(src, dst, 2, 0);
 }
+
+static int uvmshare_tree_level(pagetable_t src, pagetable_t dst,
+			       int level, uintptr_t base)
+{
+	for (int i = 0; i < 512; i++) {
+		pte_t pte = src[i];
+		if (!(pte & PTE_V))
+			continue;
+		uintptr_t va = base | ((uintptr_t)i << PXSHIFT(level));
+		if (pte & (PTE_R | PTE_W | PTE_X)) {
+			pte_t *dst_pte;
+
+			if (va == TRAMPOLINE || va == TRAPFRAME)
+				continue;
+			dst_pte = va2pte(dst, va, true);
+			if (!dst_pte)
+				return -ENOMEM;
+			*dst_pte = pte;
+		} else if (level > 0) {
+			if (uvmshare_tree_level((pagetable_t)PTE2PA(pte), dst,
+						level - 1, va) != 0)
+				return -ENOMEM;
+		}
+	}
+	return 0;
+}
+
+int uvmshare_tree(pagetable_t src, pagetable_t dst)
+{
+	if (!src || !dst)
+		return -EINVAL;
+	return uvmshare_tree_level(src, dst, 2, 0);
+}
