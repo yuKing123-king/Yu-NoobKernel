@@ -1,5 +1,9 @@
 #pragma once
 
+#if !defined(QEMU)
+#define QEMU
+#endif
+
 #if defined(QEMU)
 #include <platform/qemu_virt.h>
 #endif
