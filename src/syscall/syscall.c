@@ -19,8 +19,8 @@
 
 #include <misc/errno.h>
 
-/* 用户栈页数（64KB = 16 pages，busybox sh 需要约 8-12KB） */
-#define STACK_PAGES     16
+/* 用户栈页数。libcbench 的 regex/stdio 路径会把主线程栈压到 256KB 以下。 */
+#define STACK_PAGES     128
 #include <misc/align.h>
 #include <hal/riscv.h>
 #include <misc/cputime.h>
@@ -34,6 +34,7 @@ extern pagetable_t kpagetable;
 #define PROT_READ	1
 #define PROT_WRITE	2
 #define PROT_EXEC	4
+#define PTE_MMAP_RESERVED (1UL << 8)
 extern char trampoline[];
 
 /* ============================================================
@@ -49,6 +50,26 @@ static struct {
 	int nr;
 	syscall_fn_t fn;
 } sc_table[SC_TABLE_SIZE];
+static int clone_debug_budget = 0;
+static int thread_exit_debug_budget = 0;
+static int tidaddr_debug_budget = 0;
+static int munmap_debug_budget = 0;
+static int mmap_debug_budget = 0;
+static int brk_debug_budget = 0;
+static int child_syscall_debug_budget = 0;
+
+#define FUTEX_WAIT 0
+#define FUTEX_WAKE 1
+#define FUTEX_WAIT_BITSET 9
+#define FUTEX_WAKE_BITSET 10
+#define FUTEX_PRIVATE_FLAG 128
+#define FUTEX_CLOCK_REALTIME 256
+#define FUTEX_CMD_MASK ~(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME)
+#define FUTEX_BUCKETS 64
+
+static struct wait_queue futex_wqs[FUTEX_BUCKETS];
+static bool futex_ready;
+static int futex_debug_budget = 0;
 
 static inline int sc_hash(int nr) { return nr & SC_TABLE_MASK; }
 
@@ -85,6 +106,221 @@ syscall_fn_t syscall_lookup(int nr)
 
 static inline struct proc *curproc(void) { return thiscpu()->proc; }
 
+static inline struct wait_queue *futex_bucket(uintptr_t uaddr)
+{
+	return &futex_wqs[(uaddr >> 2) & (FUTEX_BUCKETS - 1)];
+}
+
+static void futex_init_once(void)
+{
+	if (futex_ready)
+		return;
+	for (int i = 0; i < FUTEX_BUCKETS; i++)
+		wait_queue_init(&futex_wqs[i]);
+	futex_ready = true;
+}
+
+static int futex_read_u32(struct proc *p, uintptr_t uaddr, int *val)
+{
+	int tmp;
+
+	if (copyin(p->pagetable, (char *)&tmp, uaddr, sizeof(tmp)) < 0)
+		return -EFAULT;
+	*val = tmp;
+	return 0;
+}
+
+static void futex_wake_addr(uintptr_t uaddr)
+{
+	struct wait_queue *wq;
+	const int wake_all = 0x7fffffff;
+
+	futex_init_once();
+	wq = futex_bucket(uaddr);
+	wait_queue_wakeup_addr(wq, uaddr, wake_all);
+}
+
+static void sync_shared_brk(struct proc *owner, uintptr_t brk_end)
+{
+	struct list_head *pos;
+
+	if (!owner)
+		return;
+	owner->brk_end = brk_end;
+
+	spinlock_acquire(&owner->lock);
+	list_for_each(pos, &owner->children) {
+		struct proc *child = list_entry(pos, struct proc, sibling);
+		if (child->vm_shared)
+			child->brk_end = brk_end;
+	}
+	spinlock_release(&owner->lock);
+}
+
+static struct proc *shared_vm_owner(struct proc *p)
+{
+	if (p && p->vm_shared && p->parent)
+		return p->parent;
+	return p;
+}
+
+static inline void shared_vm_lock(struct proc *p)
+{
+	if (p)
+		spinlock_acquire(&p->vm_lock);
+}
+
+static inline void shared_vm_unlock(struct proc *p)
+{
+	if (p)
+		spinlock_release(&p->vm_lock);
+}
+
+static int shared_map_page(struct proc *owner, uintptr_t va, uintptr_t pa,
+			   int pte_flags)
+{
+	struct list_head *pos;
+	int ret;
+
+	ret = mappages(owner->pagetable, va, pa, 1, pte_flags);
+	if (ret != 0)
+		return ret;
+
+	spinlock_acquire(&owner->lock);
+	list_for_each(pos, &owner->children) {
+		struct proc *child = list_entry(pos, struct proc, sibling);
+		if (!child->vm_shared)
+			continue;
+		ret = mappages(child->pagetable, va, pa, 1, pte_flags);
+		if (ret != 0) {
+			spinlock_release(&owner->lock);
+			return ret;
+		}
+	}
+	spinlock_release(&owner->lock);
+	sfence_vma();
+	return 0;
+}
+
+static int shared_reserve_page(struct proc *owner, uintptr_t va)
+{
+	struct list_head *pos;
+	pte_t *pte = va2pte(owner->pagetable, va, true);
+
+	if (!pte)
+		return -ENOMEM;
+	*pte = PTE_MMAP_RESERVED;
+
+	spinlock_acquire(&owner->lock);
+	list_for_each(pos, &owner->children) {
+		struct proc *child = list_entry(pos, struct proc, sibling);
+		if (!child->vm_shared)
+			continue;
+		pte = va2pte(child->pagetable, va, true);
+		if (!pte) {
+			spinlock_release(&owner->lock);
+			return -ENOMEM;
+		}
+		*pte = PTE_MMAP_RESERVED;
+	}
+	spinlock_release(&owner->lock);
+	sfence_vma();
+	return 0;
+}
+
+static void shared_unmap_page(struct proc *owner, uintptr_t va)
+{
+	struct list_head *pos;
+	pte_t *pte;
+
+	pte = va2pte(owner->pagetable, va, false);
+	if (pte)
+		*pte = 0;
+	unmappages(owner->pagetable, va, 1);
+	spinlock_acquire(&owner->lock);
+	list_for_each(pos, &owner->children) {
+		struct proc *child = list_entry(pos, struct proc, sibling);
+		if (!child->vm_shared)
+			continue;
+		pte = va2pte(child->pagetable, va, false);
+		if (pte)
+			*pte = 0;
+		unmappages(child->pagetable, va, 1);
+	}
+	spinlock_release(&owner->lock);
+	sfence_vma();
+}
+
+static int shared_protect_page(struct proc *owner, uintptr_t va, int pte_flags)
+{
+	struct list_head *pos;
+	pte_t *pte;
+	bool prot_none = (pte_flags & PTE_U) == 0;
+
+	pte = va2pte(owner->pagetable, va, false);
+	if (!pte || !(*pte & PTE_V)) {
+		if (!pte || !(*pte & PTE_MMAP_RESERVED))
+			return -ENOMEM;
+		if (prot_none)
+			return 0;
+		uintptr_t pa = (uintptr_t)kzalloc(PAGE_SIZE);
+		if (!pa)
+			return -ENOMEM;
+		return shared_map_page(owner, va, pa, pte_flags);
+	}
+	*pte = PA2PTE(PTE2PA(*pte)) | pte_flags | PTE_V | PTE_A |
+	       ((pte_flags & PTE_W) ? PTE_D : 0);
+
+	spinlock_acquire(&owner->lock);
+	list_for_each(pos, &owner->children) {
+		struct proc *child = list_entry(pos, struct proc, sibling);
+		if (!child->vm_shared)
+			continue;
+		pte = va2pte(child->pagetable, va, false);
+		if (!pte || !(*pte & PTE_V)) {
+			spinlock_release(&owner->lock);
+			return -ENOMEM;
+		}
+		*pte = PA2PTE(PTE2PA(*pte)) | pte_flags | PTE_V | PTE_A |
+		       ((pte_flags & PTE_W) ? PTE_D : 0);
+	}
+	spinlock_release(&owner->lock);
+	sfence_vma();
+	return 0;
+}
+
+static bool user_range_has_mapping(pagetable_t pt, uintptr_t start, size_t sz)
+{
+	uintptr_t end = start + sz;
+
+	for (uintptr_t a = start; a < end; a += PAGE_SIZE) {
+		pte_t *pte = va2pte(pt, a, false);
+		if (pte && ((*pte & PTE_V) || (*pte & PTE_MMAP_RESERVED)))
+			return true;
+	}
+	return false;
+}
+
+static uintptr_t find_free_user_range(pagetable_t pt, uintptr_t start, size_t sz,
+				      uintptr_t limit)
+{
+	uintptr_t cur = PAGE_ALIGN_UP(start);
+	uintptr_t end_limit;
+
+	if (sz == 0 || cur >= limit)
+		return 0;
+	if (sz > limit - cur)
+		return 0;
+
+	end_limit = limit - sz;
+	while (cur <= end_limit) {
+		if (!user_range_has_mapping(pt, cur, sz))
+			return cur;
+		cur += PAGE_SIZE;
+	}
+	return 0;
+}
+
 static struct proc *find_child_by_pid(struct proc *parent, int pid)
 {
 	struct list_head *pos;
@@ -99,6 +335,30 @@ static struct proc *find_child_by_pid(struct proc *parent, int pid)
 	}
 
 	return NULL;
+}
+
+static void reap_zombie_threads(struct proc *parent)
+{
+	struct list_head *pos, *n;
+
+	if (!parent)
+		return;
+
+	spinlock_acquire(&parent->lock);
+	list_for_each_safe(pos, n, &parent->children) {
+		struct proc *child = list_entry(pos, struct proc, sibling);
+
+		if (!child->vm_shared || child->state != PROC_ZOMBIE)
+			continue;
+
+		child->parent = NULL;
+		list_del(&child->sibling);
+		INIT_LIST_HEAD(&child->sibling);
+		spinlock_release(&parent->lock);
+		free_proc(child);
+		spinlock_acquire(&parent->lock);
+	}
+	spinlock_release(&parent->lock);
 }
 
 struct kernel_timespec {
@@ -319,28 +579,52 @@ static struct dentry *resolve_dirfd_base(struct proc *p, long dirfd,
 
 uintptr_t sys_write(int fd, uintptr_t buf, size_t len)
 {
-	char tmp[512];
-	size_t n = len < sizeof(tmp) ? len : sizeof(tmp);
 	struct proc *p = curproc();
+	size_t done = 0;
+
+	if (len == 0)
+		return 0;
 
 	/* 即使 fd==1/2，如果已被 dup 重定向到真实文件则走 file_write */
 	if (fd == 1 || fd == 2) {
 		struct file *f = fd_get(p->fd_table, fd);
 		if (f) {
-			if (copyin(p->pagetable, tmp, buf, n) < 0) {
-				file_put(f);
-				return -EFAULT;
+			char tmp[512];
+			while (done < len) {
+				size_t n = len - done;
+				if (n > sizeof(tmp))
+					n = sizeof(tmp);
+				if (copyin(p->pagetable, tmp, buf + done, n) < 0) {
+					file_put(f);
+					return done > 0 ? done : -EFAULT;
+				}
+				ssize_t ret = file_write(f, tmp, n);
+				if (ret < 0) {
+					file_put(f);
+					return done > 0 ? done : ret;
+				}
+				done += (size_t)ret;
+				if ((size_t)ret < n) {
+					file_put(f);
+					return done;
+				}
 			}
-			ssize_t ret = file_write(f, tmp, n);
 			file_put(f);
-			return ret < 0 ? ret : n;
+			return done;
 		}
-		/* 没有文件（原始控制台）-> SBI */
-		if (copyin(p->pagetable, tmp, buf, n) < 0)
-			return -EFAULT;
-		for (size_t i = 0; i < n; i++)
-			sbi_console_putchar(tmp[i]);
-		return n;
+
+		while (done < len) {
+				char tmp[512];
+				size_t n = len - done;
+				if (n > sizeof(tmp))
+				n = sizeof(tmp);
+			if (copyin(p->pagetable, tmp, buf + done, n) < 0)
+				return done > 0 ? done : -EFAULT;
+			for (size_t i = 0; i < n; i++)
+				sbi_console_putchar(tmp[i]);
+			done += n;
+		}
+		return done;
 	}
 
 	/* file fd */
@@ -348,19 +632,37 @@ uintptr_t sys_write(int fd, uintptr_t buf, size_t len)
 	if (!f)
 		return -EBADF;
 
-	if (copyin(p->pagetable, tmp, buf, n) < 0) {
-		file_put(f);
-		return -EFAULT;
+	while (done < len) {
+		char tmp[512];
+		size_t n = len - done;
+		if (n > sizeof(tmp))
+			n = sizeof(tmp);
+
+		if (copyin(p->pagetable, tmp, buf + done, n) < 0) {
+			file_put(f);
+			return done > 0 ? done : -EFAULT;
+		}
+
+		ssize_t ret = file_write(f, tmp, n);
+		if (ret < 0) {
+			file_put(f);
+			return done > 0 ? done : ret;
+		}
+		done += (size_t)ret;
+		if ((size_t)ret < n) {
+			file_put(f);
+			return done;
+		}
 	}
 
-	ssize_t ret = file_write(f, tmp, n);
 	file_put(f);
-	return ret < 0 ? ret : n;
+	return done;
 }
 
 uintptr_t sys_read(int fd, uintptr_t buf, size_t len)
 {
 	struct proc *p = curproc();
+	size_t done = 0;
 
 	if (len == 0)
 		return 0;
@@ -369,18 +671,29 @@ uintptr_t sys_read(int fd, uintptr_t buf, size_t len)
 	if (!f)
 		return -EBADF;
 
-	char tmp[512];
-	size_t n = len < sizeof(tmp) ? len : sizeof(tmp);
-	ssize_t ret = file_read(f, tmp, n);
-	if (ret > 0) {
-		if (copyout(p->pagetable, buf, tmp, ret) < 0) {
+	while (done < len) {
+		char tmp[512];
+		size_t n = len - done;
+		if (n > sizeof(tmp))
+			n = sizeof(tmp);
+		ssize_t ret = file_read(f, tmp, n);
+		if (ret < 0) {
 			file_put(f);
-			return -EFAULT;
+			return done > 0 ? done : ret;
 		}
+		if (ret == 0)
+			break;
+		if (copyout(p->pagetable, buf + done, tmp, ret) < 0) {
+			file_put(f);
+			return done > 0 ? done : -EFAULT;
+		}
+		done += (size_t)ret;
+		if ((size_t)ret < n)
+			break;
 	}
 
 	file_put(f);
-	return ret;
+	return done;
 }
 
 /* execve 失败后用户空间已被销毁，不能 return 到用户态，
@@ -407,8 +720,14 @@ static void execve_die(int status)
 uintptr_t sys_exit(int status)
 {
 	struct proc *p = curproc();
+	if (p->vm_shared && thread_exit_debug_budget > 0) {
+		infof("thread-exit: pid=%d tgid=%d status=%d clear_child_tid=%p sp=%p tp=%p",
+		      p->pid, p->tgid, status, p->clear_child_tid,
+		      p->tf ? p->tf->sp : 0, p->tf ? p->tf->tp : 0);
+		thread_exit_debug_budget--;
+	}
 	p->exit_code = status;
-	p->state = PROC_ZOMBIE;
+	p->futex_uaddr = 0;
 
 	/* 关闭所有 fd：使管道写端及时释放，避免读端永久阻塞等 EOF */
 	if (p->fd_table) {
@@ -416,13 +735,20 @@ uintptr_t sys_exit(int status)
 		p->fd_table = NULL;
 	}
 
-	/* set_tid_address: 写 0 到 clear_child_tid，唤醒 futex 等待者 */
 	if (p->clear_child_tid) {
 		int zero = 0;
-		copyout(p->pagetable, (uintptr_t)p->clear_child_tid, (char *)&zero,
-			sizeof(zero));
+		if (p->vm_shared && p->tgid >= 7700 &&
+		    thread_exit_debug_budget > 0) {
+			infof("thread-exit-clear: pid=%d tgid=%d clear_child_tid=%p",
+			      p->pid, p->tgid, p->clear_child_tid);
+			thread_exit_debug_budget--;
+		}
+		copyout(p->pagetable, (uintptr_t)p->clear_child_tid,
+			(char *)&zero, sizeof(zero));
+		futex_wake_addr((uintptr_t)p->clear_child_tid);
 	}
 
+	p->state = PROC_ZOMBIE;
 	if (p->parent)
 		wait_queue_wakeup_one(&p->parent->child_wait);
 	sched_yield();
@@ -435,6 +761,12 @@ uintptr_t sys_exit_group(int status) { return sys_exit(status); }
 uintptr_t sys_set_tid_address(uintptr_t tidptr)
 {
 	struct proc *p = curproc();
+	if (p->vm_shared && tidaddr_debug_budget > 0) {
+		infof("set_tid_address: pid=%d tgid=%d tidptr=%p old=%p tp=%p",
+		      p->pid, p->tgid, tidptr, p->clear_child_tid,
+		      p->tf ? p->tf->tp : 0);
+		tidaddr_debug_budget--;
+	}
 	p->clear_child_tid = (int *)tidptr;
 	return p->pid;
 }
@@ -781,29 +1113,42 @@ fail:
 
 /*
  * sys_clone - 创建子进程（支持 CLONE_VM 共享页表 + 指定子进程栈）
- * RISC-V ABI: clone(flags, child_stack, ptid, ctid, tls)
+ * RISC-V ABI: clone(flags, child_stack, ptid, tls, ctid)
  * 当 CLONE_VM 置位时，父子共享页表（线程风格）
  * child_stack 指定子进程的初始 sp（不为 0 时使用，否则继承父进程 sp）
  */
 uintptr_t sys_clone(uintptr_t flags, uintptr_t child_stack, uintptr_t ptid,
-		    uintptr_t ctid, uintptr_t tls)
+		    uintptr_t tls, uintptr_t ctid)
 {
 	struct proc *parent = curproc();
-	struct proc *child = alloc_proc();
+	struct proc *child;
+	bool share_vm = (flags & CLONE_VM) != 0;
+	u64 child_entry[2] = { 0, 0 };
+
+	/*
+	 * pthread_join 不走 wait4；对 CLONE_THREAD 线程在父线程再次
+	 * 创建新线程前主动回收已经退出的线程内核对象，避免 proc/kstack/
+	 * pagetable 长时间泄漏后把后续线程创建路径拖坏。
+	 */
+	if (flags & CLONE_THREAD)
+		reap_zombie_threads(parent);
+	child = alloc_proc();
 	if (!child)
 		return -ENOMEM;
 
 	child->pid = alloc_pid();
-	child->tgid = child->pid;
+	child->tgid = (flags & CLONE_THREAD) ? parent->tgid : child->pid;
 	child->parent = parent;
 
 	child->pagetable = uvmcreate();
 	if (!child->pagetable)
 		goto fail;
 
-	if (uvmcopy_tree(parent->pagetable, child->pagetable) < 0) {
+	if ((share_vm ? uvmshare_tree(parent->pagetable, child->pagetable)
+		      : uvmcopy_tree(parent->pagetable, child->pagetable)) < 0) {
 		goto fail_freept;
 	}
+	child->vm_shared = share_vm;
 
 	fd_table_free(child->fd_table);
 	/*
@@ -833,6 +1178,31 @@ uintptr_t sys_clone(uintptr_t flags, uintptr_t child_stack, uintptr_t ptid,
 
 	if (child_stack >= PAGE_SIZE && child_stack < USER_TOP) {
 		child->tf->sp = child_stack;
+	}
+	if (flags & CLONE_PARENT_SETTID) {
+		int tid = child->pid;
+		if (copyout(parent->pagetable, ptid, (char *)&tid, sizeof(tid)) < 0)
+			goto fail_freetf;
+	}
+	if (flags & CLONE_SETTLS)
+		child->tf->tp = tls;
+	if ((flags & CLONE_CHILD_SETTID) &&
+	    ctid >= PAGE_SIZE && ctid < USER_TOP) {
+		int tid = child->pid;
+		if (copyout(child->pagetable, ctid, (char *)&tid, sizeof(tid)) < 0)
+			goto fail_freetf;
+	}
+	if (flags & CLONE_CHILD_CLEARTID)
+		child->clear_child_tid = (int *)ctid;
+	if ((flags & CLONE_THREAD) && child->tgid >= 7700 &&
+	    clone_debug_budget > 0) {
+		(void)copyin(parent->pagetable, (char *)child_entry, child_stack,
+			     sizeof(child_entry));
+		infof("clone-debug: parent=%d child=%d tgid=%d epc=%p ra=%p flags=%lx sp=%p tls=%p ptid=%p ctid=%p stack0=%p stack1=%p",
+		      parent->pid, child->pid, child->tgid, child->tf->epc,
+		      child->tf->ra, flags, child_stack, tls, ptid, ctid,
+		      child_entry[0], child_entry[1]);
+		clone_debug_budget--;
 	}
 
 	/* 映射 trampoline 和 trapframe */
@@ -1590,7 +1960,7 @@ uintptr_t sys_wait4(uintptr_t pid_arg, uintptr_t wstatus, uintptr_t options, uin
 
 uintptr_t sys_getpid(void)
 {
-	return curproc()->pid;
+	return curproc()->tgid;
 }
 
 uintptr_t sys_getppid(void)
@@ -1666,97 +2036,115 @@ uintptr_t sys_fstatfs(int fd, uintptr_t buf)
 uintptr_t sys_brk(uintptr_t addr)
 {
 	struct proc *p = curproc();
+	struct proc *brk_owner = shared_vm_owner(p);
+	uintptr_t cur_brk;
+
+	shared_vm_lock(brk_owner);
+	cur_brk = brk_owner->brk_end;
+	if (brk_debug_budget > 0 && p->tgid >= 7700) {
+		infof("brk-debug: pid=%d tgid=%d req=%p cur=%p shared=%d",
+		      p->pid, p->tgid, addr, cur_brk, p->vm_shared ? 1 : 0);
+		brk_debug_budget--;
+	}
 
 	if (addr == 0) {
-		/* 首次调用：如果 brk_end 为 0，返回一个合理的默认起始值 */
-		if (p->brk_end == 0)
-			return (1ULL << 20); /* 默认起始 1MB */
-		return p->brk_end;
+		/* CLONE_VM 线程必须观察共享地址空间拥有者的 program break。 */
+		uintptr_t ret = cur_brk == 0 ? (1ULL << 20) : cur_brk;
+		shared_vm_unlock(brk_owner);
+		return ret; /* 默认起始 1MB */
 	}
 
 	/* 首次设置 brk，从默认起始地址开始 */
-	if (p->brk_end == 0)
-		p->brk_end = (1ULL << 20);
+	if (cur_brk == 0) {
+		brk_owner->brk_end = (1ULL << 20);
+		cur_brk = brk_owner->brk_end;
+	}
 
-	if (addr < p->brk_end) {
+	if (addr < cur_brk) {
 		/* 缩小堆 */
-		uintptr_t old = PAGE_ALIGN_UP(p->brk_end);
-		p->brk_end = addr;
+		uintptr_t old = PAGE_ALIGN_UP(cur_brk);
 		uintptr_t new = PAGE_ALIGN_UP(addr);
 		/* 释放多余页 */
 		for (uintptr_t a = new; a < old; a += PAGE_SIZE) {
 			uintptr_t pa = walkaddr(p->pagetable, a);
 			if (pa) {
-				unmappages(p->pagetable, a, 1);
+				shared_unmap_page(brk_owner, a);
 				kfree((void *)pa);
 			}
 		}
-		return p->brk_end;
+		sync_shared_brk(brk_owner, addr);
+		shared_vm_unlock(brk_owner);
+		return addr;
 	}
 
-	if (addr > p->brk_end) {
+	if (addr > cur_brk) {
 		/* 扩大堆 */
-		uintptr_t old = PAGE_ALIGN_UP(p->brk_end);
+		uintptr_t old = PAGE_ALIGN_UP(cur_brk);
 		uintptr_t new_end = PAGE_ALIGN_UP(addr);
 		for (uintptr_t a = old; a < new_end; a += PAGE_SIZE) {
 			if (walkaddr(p->pagetable, a) != 0)
 				continue;
 			uintptr_t pa = (uintptr_t)kzalloc(PAGE_SIZE);
 			if (!pa)
-				return p->brk_end;
-			if (mappages(p->pagetable, a, pa, 1,
-				     PTE_R | PTE_W | PTE_U) != 0) {
+				goto out;
+			if (shared_map_page(brk_owner, a, pa,
+					    PTE_R | PTE_W | PTE_U) != 0) {
 				kfree((void *)pa);
-				return p->brk_end;
+				goto out;
 			}
 		}
-		p->brk_end = addr;
+		sync_shared_brk(brk_owner, addr);
 	}
 
-	return p->brk_end;
+out:
+	cur_brk = brk_owner->brk_end;
+	if (brk_debug_budget > 0 && p->tgid >= 7700) {
+		infof("brk-debug-ret: pid=%d tgid=%d ret=%p", p->pid, p->tgid,
+		      cur_brk);
+		brk_debug_budget--;
+	}
+	shared_vm_unlock(brk_owner);
+	return cur_brk;
 }
 
 uintptr_t sys_mmap(uintptr_t addr, size_t len, int prot, int flags, int fd, loff_t offset)
 {
 	struct proc *p = curproc();
+	struct proc *vm_owner = shared_vm_owner(p);
+	bool prot_none = (prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0;
 
 	if (len == 0) {
 		goto fail;
 	}
+	if (mmap_debug_budget > 0 && p->tgid >= 7700) {
+		infof("mmap-debug: pid=%d tgid=%d addr=%p len=%lx prot=%x flags=%x fd=%d off=%lx brk=%p",
+		      p->pid, p->tgid, addr, len, prot, flags, fd, offset,
+		      vm_owner->brk_end);
+		mmap_debug_budget--;
+	}
 
-	int pte_flags = PTE_U;
+	shared_vm_lock(vm_owner);
+
+	int pte_flags = prot_none ? PTE_R : PTE_U;
 	if (prot & PROT_READ) pte_flags |= PTE_R;
-	if (prot & PROT_WRITE) pte_flags |= PTE_W;
+	if (prot & PROT_WRITE) pte_flags |= PTE_R | PTE_W;
 	if (prot & PROT_EXEC) pte_flags |= PTE_X;
 	size_t sz = PAGE_ALIGN_UP(len);
 	uintptr_t start;
+	uintptr_t limit = USER_TOP - STACK_PAGES * PAGE_SIZE;
 
 	if (flags & 0x10 /* MAP_FIXED */) {
 		start = addr;
-	} else if (addr != 0 && addr < USER_TOP - STACK_PAGES * PAGE_SIZE) {
-		/* 非 MAP_FIXED 时 addr 作为 hint：如果地址范围空闲则用，否则 fallback */
-		uintptr_t hint = PAGE_ALIGN_UP(addr);
-		int avail = 1;
-		for (uintptr_t a = hint; a < hint + sz; a += PAGE_SIZE) {
-			if (walkaddr(p->pagetable, a) != 0) { avail = 0; break; }
-		}
-		start = avail ? hint : PAGE_ALIGN_UP(p->brk_end ? p->brk_end : 0x10000);
 	} else {
-		start = PAGE_ALIGN_UP(p->brk_end ? p->brk_end : 0x10000);
-	}
+		uintptr_t hint = 0;
+		uintptr_t base = PAGE_ALIGN_UP(vm_owner->brk_end ? vm_owner->brk_end : 0x10000);
 
-	/* PROT_NONE (prot=0): 不创建页表项，仅对 MAP_FIXED 解除已有映射 */
-	if (pte_flags == PTE_U) {
-		if (flags & 0x10) {
-			for (uintptr_t a = start; a < start + sz; a += PAGE_SIZE) {
-				uintptr_t old_pa = walkaddr(p->pagetable, a);
-				if (old_pa) {
-					unmappages(p->pagetable, a, 1);
-					kfree((void *)old_pa);
-				}
-			}
-		}
-		return start;
+		if (addr != 0 && addr < limit)
+			hint = find_free_user_range(p->pagetable, addr, sz, limit);
+		start = hint ? hint :
+			       find_free_user_range(p->pagetable, base, sz, limit);
+		if (start == 0)
+			goto fail_unlock;
 	}
 
 	/* File-backed mmap */
@@ -1769,18 +2157,18 @@ uintptr_t sys_mmap(uintptr_t addr, size_t len, int prot, int flags, int fd, loff
 		f->f_pos = offset;
 
 		for (uintptr_t a = start; a < start + sz; a += PAGE_SIZE) {
-			if (walkaddr(p->pagetable, a) != 0)
-				continue;
 			uintptr_t pa = (uintptr_t)kzalloc(PAGE_SIZE);
 			if (!pa) {
 				f->f_pos = saved_pos;
 				file_put(f);
+				shared_vm_unlock(vm_owner);
 				return -ENOMEM;
 			}
-			if (mappages(p->pagetable, a, pa, 1, pte_flags) != 0) {
+			if (shared_map_page(vm_owner, a, pa, pte_flags) != 0) {
 				kfree((void *)pa);
 				f->f_pos = saved_pos;
 				file_put(f);
+				shared_vm_unlock(vm_owner);
 				return -ENOMEM;
 			}
 			size_t to_read = PAGE_SIZE;
@@ -1794,66 +2182,134 @@ uintptr_t sys_mmap(uintptr_t addr, size_t len, int prot, int flags, int fd, loff
 		f->f_pos = saved_pos;
 		file_put(f);
 
-		if (start + sz > p->brk_end)
-			p->brk_end = start + sz;
+		if (start + sz > vm_owner->brk_end)
+			sync_shared_brk(vm_owner, start + sz);
+		if (mmap_debug_budget > 0 && p->tgid >= 7700) {
+			infof("mmap-debug-ret: pid=%d tgid=%d start=%p sz=%lx file=1",
+			      p->pid, p->tgid, start, sz);
+			mmap_debug_budget--;
+		}
+		shared_vm_unlock(vm_owner);
 		return start;
 	}
 
 	/* Anonymous mmap */
 	for (uintptr_t a = start; a < start + sz; a += PAGE_SIZE) {
+		pte_t *pte;
 		uintptr_t old_pa = walkaddr(p->pagetable, a);
 		if (old_pa != 0) {
 			if (flags & 0x10 /* MAP_FIXED */) {
-				unmappages(p->pagetable, a, 1);
+				shared_unmap_page(vm_owner, a);
 				kfree((void *)old_pa);
 			} else {
 				continue;
 			}
+		} else {
+			pte = va2pte(p->pagetable, a, false);
+			if (pte && (*pte & PTE_V)) {
+				if (flags & 0x10) {
+					shared_unmap_page(vm_owner, a);
+				} else {
+					continue;
+				}
+			}
 		}
-		uintptr_t pa = (uintptr_t)kzalloc(PAGE_SIZE);
-		if (!pa)
-			return -ENOMEM;
-		if (mappages(p->pagetable, a, pa, 1, pte_flags) != 0) {
-			kfree((void *)pa);
-			return -ENOMEM;
+		if (prot_none) {
+			if (shared_reserve_page(vm_owner, a) != 0)
+				goto fail_unlock;
+		} else {
+			uintptr_t pa = (uintptr_t)kzalloc(PAGE_SIZE);
+			if (!pa)
+				goto fail_unlock;
+			if (shared_map_page(vm_owner, a, pa, pte_flags) != 0) {
+				kfree((void *)pa);
+				goto fail_unlock;
+			}
 		}
 	}
 
-	if (start + sz > p->brk_end)
-		p->brk_end = start + sz;
+	if (start + sz > vm_owner->brk_end)
+		sync_shared_brk(vm_owner, start + sz);
+	if (mmap_debug_budget > 0 && p->tgid >= 7700) {
+		infof("mmap-debug-ret: pid=%d tgid=%d start=%p sz=%lx file=0",
+		      p->pid, p->tgid, start, sz);
+		mmap_debug_budget--;
+	}
+	shared_vm_unlock(vm_owner);
 	return start;
 
+fail_unlock:
+	shared_vm_unlock(vm_owner);
+	return -ENOMEM;
 fail:
 	return (uintptr_t)-1; /* MAP_FAILED */
 }
 
 uintptr_t sys_munmap(uintptr_t addr, size_t len)
 {
+	struct proc *vm_owner = shared_vm_owner(curproc());
+	struct proc *p = curproc();
+	if (munmap_debug_budget > 0 && addr >= 0x100000) {
+		infof("munmap-debug: pid=%d tgid=%d shared=%d addr=%p len=%lx sp=%p tp=%p",
+		      p->pid, p->tgid, p->vm_shared ? 1 : 0, addr, len,
+		      p->tf ? p->tf->sp : 0, p->tf ? p->tf->tp : 0);
+		munmap_debug_budget--;
+	}
 	if (addr == 0 || len == 0)
 		return 0;
+	shared_vm_lock(vm_owner);
 	size_t sz = PAGE_ALIGN_UP(len);
 	uintptr_t range_end = addr + sz;
 	/* 不允许 unmap TRAMPOLINE/TRAPFRAME/栈区域 */
 	if ((addr >= TRAMPOLINE && addr < TRAMPOLINE + PAGE_SIZE) ||
 	    (addr >= TRAPFRAME && addr < TRAPFRAME + PAGE_SIZE) ||
-	    (range_end > USER_TOP - STACK_PAGES * PAGE_SIZE && addr < USER_TOP))
+	    (range_end > USER_TOP - STACK_PAGES * PAGE_SIZE && addr < USER_TOP)) {
+		shared_vm_unlock(vm_owner);
 		return -EINVAL;
+	}
 	for (uintptr_t a = addr; a < range_end; a += PAGE_SIZE) {
 		uintptr_t pa = walkaddr(curproc()->pagetable, a);
+		pte_t *pte = va2pte(curproc()->pagetable, a, false);
 		if (pa) {
-			unmappages(curproc()->pagetable, a, 1);
+			shared_unmap_page(vm_owner, a);
 			kfree((void *)pa);
+		} else if (pte && (*pte & PTE_MMAP_RESERVED)) {
+			shared_unmap_page(vm_owner, a);
 		}
 	}
+	shared_vm_unlock(vm_owner);
 	return 0;
 }
 
 uintptr_t sys_mprotect(uintptr_t addr, size_t len, int prot)
 {
-	/* stub: 返回成功 */
-	(void)addr;
-	(void)len;
-	(void)prot;
+	struct proc *p = curproc();
+	struct proc *vm_owner = shared_vm_owner(p);
+	uintptr_t start = PAGE_ALIGN_DOWN(addr);
+	uintptr_t end;
+	bool prot_none = (prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0;
+	int pte_flags = prot_none ? PTE_R : PTE_U;
+
+	if (len == 0)
+		return 0;
+	if (addr >= USER_TOP)
+		return -EINVAL;
+
+	if (prot & PROT_READ)
+		pte_flags |= PTE_R;
+	if (prot & PROT_WRITE)
+		pte_flags |= PTE_R | PTE_W;
+	if (prot & PROT_EXEC)
+		pte_flags |= PTE_X;
+	end = PAGE_ALIGN_UP(addr + len);
+	shared_vm_lock(vm_owner);
+	for (uintptr_t a = start; a < end; a += PAGE_SIZE) {
+		if (shared_protect_page(vm_owner, a, pte_flags) != 0) {
+			shared_vm_unlock(vm_owner);
+			return -ENOMEM;
+		}
+	}
+	shared_vm_unlock(vm_owner);
 	return 0;
 }
 
@@ -3094,6 +3550,90 @@ uintptr_t sys_set_robust_list(uintptr_t head, uintptr_t len)
 	return 0;
 }
 
+uintptr_t sys_futex(uintptr_t uaddr, int futex_op, int val, uintptr_t timeout,
+		    uintptr_t uaddr2, int val3)
+{
+	struct proc *p = curproc();
+	struct wait_queue *wq;
+	int cur;
+	int op = futex_op & FUTEX_CMD_MASK;
+
+	(void)timeout;
+	(void)uaddr2;
+	(void)val3;
+
+	if ((uaddr & (sizeof(int) - 1)) != 0)
+		return -EINVAL;
+
+	futex_init_once();
+	wq = futex_bucket(uaddr);
+	if (p->tgid >= 7700 && futex_debug_budget > 0) {
+		infof("futex-debug: pid=%d tgid=%d op=%x cmd=%d val=%d uaddr=%p clear_child_tid=%p timeout=%p uaddr2=%p val3=%x",
+		      p->pid, p->tgid, futex_op, op, val, uaddr,
+		      p->clear_child_tid, timeout, uaddr2, val3);
+		futex_debug_budget--;
+	}
+
+	switch (op) {
+	case FUTEX_WAIT:
+	case FUTEX_WAIT_BITSET:
+		for (;;) {
+			if (p->tgid >= 7700 && futex_debug_budget > 0) {
+				infof("futex-wait-enter: pid=%d tgid=%d uaddr=%p val=%d clear_child_tid=%p",
+				      p->pid, p->tgid, uaddr, val, p->clear_child_tid);
+				futex_debug_budget--;
+			}
+			spinlock_acquire(&wq->lock);
+			if (futex_read_u32(p, uaddr, &cur) < 0) {
+				spinlock_release(&wq->lock);
+				return -EFAULT;
+			}
+			if (cur != val) {
+				spinlock_release(&wq->lock);
+				return -EAGAIN;
+			}
+			p->futex_uaddr = uaddr;
+			list_add_tail(&p->runq, &wq->list);
+			p->state = PROC_SLEEPING;
+			spinlock_release(&wq->lock);
+			sched_yield();
+			p->futex_uaddr = 0;
+			if (futex_read_u32(p, uaddr, &cur) < 0)
+				return -EFAULT;
+			if (cur != val) {
+				if (p->tgid >= 7700 && futex_debug_budget > 0) {
+					infof("futex-wait-leave: pid=%d tgid=%d uaddr=%p old=%d new=%d",
+					      p->pid, p->tgid, uaddr, val, cur);
+					futex_debug_budget--;
+				}
+				return 0;
+			}
+		}
+	case FUTEX_WAKE:
+	case FUTEX_WAKE_BITSET:
+		if (val <= 0)
+			return 0;
+		cur = wait_queue_wakeup_addr(wq, uaddr, val);
+		if (p->tgid >= 7700 && futex_debug_budget > 0) {
+			infof("futex-wake-done: pid=%d tgid=%d uaddr=%p nr=%d woke=%d waiters=%d val3=%x",
+			      p->pid, p->tgid, uaddr, val, cur,
+			      wait_queue_count_addr(wq, uaddr), val3);
+			futex_debug_budget--;
+		}
+		return cur;
+	default:
+		return -ENOSYS;
+	}
+}
+
+uintptr_t sys_madvise(uintptr_t addr, size_t length, int advice)
+{
+	(void)addr;
+	(void)length;
+	(void)advice;
+	return 0;
+}
+
 uintptr_t sys_prlimit64(int pid, int resource, uintptr_t new_limit, uintptr_t old_limit)
 {
 	(void)pid;
@@ -3117,6 +3657,14 @@ void syscall(void)
 	uintptr_t a4 = p->tf->a4;
 	uintptr_t a5 = p->tf->a5;
 	uintptr_t n = p->tf->a7;
+
+	if (p->tgid >= 7700 && p->pid != p->tgid &&
+	    child_syscall_debug_budget > 0) {
+		infof("child-syscall: pid=%d tgid=%d nr=%ld epc=%p sp=%p tp=%p a0=%p a1=%p a2=%p",
+		      p->pid, p->tgid, n, p->tf->epc, p->tf->sp, p->tf->tp,
+		      a0, a1, a2);
+		child_syscall_debug_budget--;
+	}
 
 	syscall_fn_t fn = syscall_lookup((int)n);
 	if (!fn) {
@@ -3159,6 +3707,7 @@ void syscall_init(void)
 	syscall_register(SYS_mmap,        (syscall_fn_t)sys_mmap);
 	syscall_register(SYS_munmap,      (syscall_fn_t)sys_munmap);
 	syscall_register(SYS_mprotect,    (syscall_fn_t)sys_mprotect);
+	syscall_register(SYS_madvise,     (syscall_fn_t)sys_madvise);
 
 	/* FD 操作 */
 	syscall_register(SYS_dup,         (syscall_fn_t)sys_dup);
@@ -3200,6 +3749,7 @@ void syscall_init(void)
 	syscall_register(SYS_sched_yield, (syscall_fn_t)sys_sched_yield);
 	syscall_register(SYS_getrandom, (syscall_fn_t)sys_getrandom);
 	syscall_register(SYS_ppoll, (syscall_fn_t)sys_ppoll);
+	syscall_register(SYS_futex,       (syscall_fn_t)sys_futex);
 
 	/* 新增的 glibc/compat stub */
 	syscall_register(SYS_gettid,       (syscall_fn_t)sys_gettid);
