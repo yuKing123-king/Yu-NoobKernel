@@ -24,6 +24,7 @@ static long default_envp[2] = { (long)env_path, 0 };
 #define SYS_pipe2       59
 #define SYS_lseek       62
 #define SYS_unlinkat    35
+#define SYS_mkdirat     34
 
 #define O_RDONLY    0
 #define O_WRONLY    1
@@ -91,6 +92,13 @@ static long my_getdents64(int fd,void*buf,int len){return syscall3(SYS_getdents6
 static long my_dup3(int oldfd, int newfd, int flags) { return syscall3(SYS_dup3, oldfd, newfd, flags); }
 static long my_lseek(int fd, long off, int whence) { return syscall3(SYS_lseek, fd, off, whence); }
 static long my_unlinkat(int dirfd, const char *path, int flags) { return syscall3(SYS_unlinkat, dirfd, (long)path, flags); }
+static long my_mkdirat(int dirfd, const char *path, int mode) { return syscall3(SYS_mkdirat, dirfd, (long)path, mode); }
+
+static void ensure_runtime_dirs(void)
+{
+	my_mkdirat(-100, "/tmp", 0777);
+	my_mkdirat(-100, "/bin", 0755);
+}
 
 static void ensure_busybox_wrapper(const char *root, const char *name)
 {
@@ -487,6 +495,40 @@ static void run_lua_group(const char *root, const char *group_name)
 	prints("#### OS COMP TEST GROUP END "); prints(group_name); prints(" ####"); println();
 }
 
+static void run_exec_group(const char *root, const char *group_name,
+			     const char *prog_name, const char *kind)
+{
+	char prog_path[256];
+	char case_name[128];
+	long cpid;
+	int status = 0;
+
+	my_strcpy(prog_path, root);
+	my_strcat(prog_path, prog_name);
+
+	my_strcpy(case_name, group_name);
+	my_strcat(case_name, ": ");
+	my_strcat(case_name, prog_name);
+
+	prints("#### OS COMP TEST GROUP START "); prints(group_name); prints(" ####"); println();
+	print_group_case_banner("START", case_name);
+	prints("[RUN] ./"); prints(prog_name); println();
+
+	cpid = my_fork();
+	if (cpid == 0) {
+		long argv[2] = { (long)prog_path, 0 };
+		my_chdir(root);
+		long ret = my_execve(prog_path, (long)argv, (long)default_envp);
+		prints("[FAIL] exec group execve failed: "); printn(ret); println();
+		my_exit(127);
+	}
+
+	my_wait4(cpid, &status, 0, 0);
+	print_case_result(kind, case_name, ((status >> 8) & 0xff) == 0);
+	print_group_case_banner("END", case_name);
+	prints("#### OS COMP TEST GROUP END "); prints(group_name); prints(" ####"); println();
+}
+
 static void run_busybox(const char *root, const char *group_name)
 {
 	char script[256];
@@ -509,6 +551,7 @@ __attribute__((section(".text.entry"), noinline, noreturn))
 void _start(void)
 {
 	my_brk(0);
+	ensure_runtime_dirs();
 	prints("#### OS COMP TEST START ####"); println();
 
 	for (int g = 0; g < scan_group_cnt; g++) {
@@ -528,6 +571,10 @@ void _start(void)
 		char lua_name[64]; my_strcpy(lua_name, "lua-");
 		my_strcat(lua_name, scan_group_names[g] + 6);
 		run_lua_group(root, lua_name);
+
+		char libcbench_name[64]; my_strcpy(libcbench_name, "libcbench-");
+		my_strcat(libcbench_name, scan_group_names[g] + 6);
+		run_exec_group(root, libcbench_name, "libc-bench", "libcbench");
 	}
 
 	prints("#### OS COMP TEST END ####"); println();
